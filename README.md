@@ -139,10 +139,14 @@ the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
 
-**Swinging** is tuned to glide rather than sprint. The line looks for the best
-anchor in a cone rather than the first thing it touches, and runs up the face of
-whatever it hits to the roofline — a wall at head height gives a five-metre rope
-and a pirouette, which is not a swing. Gravity on the line is lighter than
+**Swinging** is tuned to glide rather than sprint. The web goes wherever the
+crosshair is pointing — any surface in reach, high or low — and the reticle sits
+on that exact point rather than in the middle of the screen, because the camera
+eases into place behind the hero and "the centre of the screen" is not where you
+are aiming while you turn. Only when you are pointing at nothing does the aim
+assist take over: it sweeps a cone, keeps the best anchor rather than the first,
+and runs the line up the face of whatever it finds to the roofline, since a wall
+at head height gives a five-metre rope and a pirouette. Gravity on the line is lighter than
 walking gravity, because an arc bought at 30m/s² is over before it starts;
 letting go converts part of the arc into lift so you carry into the next one;
 and the line takes up slack on its own so the bottom of the arc clears the

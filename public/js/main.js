@@ -350,6 +350,7 @@ let orbitAngle = 0;
 let frameAvg = 16.7;
 let qualityCheck = 0;
 let downgradeGuard = 0;
+const _aim = new THREE.Vector3();
 
 function tuneQuality(dtMs, dt) {
   frameAvg += (Math.min(dtMs, 200) - frameAvg) * 0.06;
@@ -423,6 +424,24 @@ function frame(now) {
       acc = 0;
       if (p.alive) net.send(p.netState());
     }
+
+    // Reticle over the real aim point rather than the middle of the screen.
+    // The camera's inverse matrix is only refreshed inside render(), so
+    // projecting against it here would place the reticle using last frame's
+    // camera — which is wrong by tens of pixels exactly when you are turning
+    // fast and looking at it.
+    camera.updateMatrixWorld();
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    _aim.copy(p.aimPoint).applyMatrix4(camera.matrixWorldInverse);
+    const behind = _aim.z > -0.05;
+    _aim.applyMatrix4(camera.projectionMatrix);
+    const cx = behind ? 0 : (_aim.x * 0.5 + 0.5) * innerWidth;
+    const cy = behind ? 0 : (-_aim.y * 0.5 + 0.5) * innerHeight;
+    const edge = 26;
+    ui.setCrosshair(
+      THREE.MathUtils.clamp(cx, edge, innerWidth - edge),
+      THREE.MathUtils.clamp(cy, edge, innerHeight - edge)
+    );
 
     // HUD
     ui.setPaused(!input.locked);

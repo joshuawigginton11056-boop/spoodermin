@@ -43,6 +43,8 @@ for (const up of [0, 0.35, 0.6, 0.9, 1.3]) {
 // technically a swing, but it is where "too fast and going nowhere" came from.
 const ANCHOR_MIN_RISE = 12; // the anchor has to be properly overhead
 const ANCHOR_MIN_DIST = 26; // and far enough away to arc on
+// A deliberately aimed shot only has to clear your own arm's length.
+const ANCHOR_MIN_DIRECT = 5;
 // Relaxed pass, used only when the good kind of anchor is nowhere to be found,
 // so the web still fires rather than failing silently.
 const ANCHOR_FALLBACK_RISE = 4;
@@ -163,9 +165,10 @@ export class LocalPlayer {
       this.aimDist = Infinity;
     }
     // The crosshair's "you can swing from that" state falls out of the aim ray
-    // we already cast, instead of costing a second one every frame.
+    // we already cast, instead of costing a second one every frame. Anything
+    // within reach counts now that the web goes wherever it is pointed.
     this.canWeb = this.state === STATE.SWING ||
-      (this.aimDist <= WEB.MAX_LENGTH * 1.3 && this.aimPoint.y > this.pos.y + 1.5);
+      (this.aimDist >= ANCHOR_MIN_DIRECT && this.aimDist <= WEB.MAX_LENGTH);
   }
 
   // ------------------------------------------------------------- webbing
@@ -177,6 +180,15 @@ export class LocalPlayer {
   findAnchor() {
     const from = this.eye(_v2);
     const dir = this.lookDir(_v3);
+
+    // Whatever the crosshair is actually on wins, wherever it is — a ledge, a
+    // low wall, the underside of a highway. If you are pointing at something,
+    // that is where the web goes; the assist below is for when you are not
+    // pointing at anything in particular, not a second opinion on where you
+    // meant to shoot.
+    const direct = this.world.raycast(from, dir, WEB.MAX_LENGTH);
+    if (direct && direct.dist >= ANCHOR_MIN_DIRECT) return _v5.copy(direct.point);
+
     let best = -Infinity;
     let found = false;
 

@@ -112,6 +112,23 @@ export class UI {
     this.el.crosshair.classList.toggle('can-web', !!can);
   }
 
+  /**
+   * Puts the reticle over the point the web and the web balls will actually
+   * hit. It is not the middle of the screen: the camera eases into position
+   * behind the hero, so while you are turning, the camera's forward and your
+   * aim are two different directions, and a crosshair nailed to the centre of
+   * the screen quietly lies about where you are pointing.
+   */
+  setCrosshair(x, y) {
+    const px = Math.round(x);
+    const py = Math.round(y);
+    if (this.last.chx === px && this.last.chy === py) return;
+    this.last.chx = px;
+    this.last.chy = py;
+    this.el.crosshair.style.left = `${px}px`;
+    this.el.crosshair.style.top = `${py}px`;
+  }
+
   /** "Click to take back the mouse" — shown whenever the controls are idle. */
   setPaused(on) {
     if (this.last.paused === !!on) return;
