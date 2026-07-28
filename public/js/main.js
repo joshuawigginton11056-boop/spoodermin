@@ -43,8 +43,23 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-addEventListener('error', (e) => ui.fatal(`${e.message}\n${e.filename}:${e.lineno}`));
-addEventListener('unhandledrejection', (e) => ui.fatal(String(e.reason?.stack || e.reason)));
+// A refused pointer lock is expected in some embeddings and is handled by the
+// input layer's cursor-steering fallback — it must never look like a crash.
+const isPointerLockNoise = (text) => /pointer\s*lock/i.test(text || '');
+
+addEventListener('error', (e) => {
+  if (isPointerLockNoise(e.message)) return;
+  ui.fatal(`${e.message}\n${e.filename}:${e.lineno}`);
+});
+addEventListener('unhandledrejection', (e) => {
+  const text = String(e.reason?.stack || e.reason || '');
+  if (isPointerLockNoise(text) || isPointerLockNoise(e.reason?.message)) {
+    e.preventDefault();
+    input.useFreeLook();
+    return;
+  }
+  ui.fatal(text);
+});
 
 // ------------------------------------------------------------------- state
 const game = {

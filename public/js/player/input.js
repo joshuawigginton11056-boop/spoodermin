@@ -26,6 +26,8 @@ export class Input {
       this.keys.add(k);
       this.pressed.add(k);
       if (this.active && (k === 'Space' || k === 'Tab')) e.preventDefault();
+      // With no pointer lock to exit, Escape has to release the controls itself.
+      if (k === 'Escape' && this.freeLook && this.active) this.unlock();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.code));
     addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; });
@@ -73,14 +75,41 @@ export class Input {
 
   lock() {
     if (this.freeLook) { this.active = true; return; }
-    if (!this.canvas.requestPointerLock) { this.useFreeLook(); return; }
-    try {
-      const p = this.canvas.requestPointerLock({ unadjustedMovement: true });
-      if (p && p.catch) p.catch(() => { try { this.canvas.requestPointerLock(); } catch { /* probe handles it */ } });
-    } catch {
-      try { this.canvas.requestPointerLock(); } catch { this.useFreeLook(); return; }
+    const el = this.canvas;
+    if (!el.requestPointerLock) { this.useFreeLook(); return; }
+
+    const giveUp = () => this.useFreeLook();
+    // Every request below must have a rejection handler. A stray rejected
+    // pointer-lock promise surfaces as an unhandled rejection, which is not a
+    // crash but looks exactly like one.
+    const request = (opts) => {
+      let p;
+      try {
+        p = opts ? el.requestPointerLock(opts) : el.requestPointerLock();
+      } catch {
+        giveUp();
+        return null;
+      }
+      return p && typeof p.catch === 'function' ? p : null;
+    };
+
+    const first = request({ unadjustedMovement: true });
+    if (first) {
+      first.catch((err) => {
+        // Only the raw-movement option is worth a second try; anything else
+        // (a sandboxed frame with no pointer-lock permission, a user-gesture
+        // problem) will fail again for the same reason.
+        if (err && err.name === 'NotSupportedError') {
+          const retry = request(null);
+          if (retry) retry.catch(giveUp);
+          return;
+        }
+        giveUp();
+      });
     }
-    // If the lock never lands (permission denied, sandboxed frame), fall back.
+
+    // Belt and braces: some browsers resolve the promise but never actually
+    // hand over the lock.
     clearTimeout(this._lockProbe);
     this._lockProbe = setTimeout(() => {
       if (!this.pointerLocked) this.useFreeLook();
