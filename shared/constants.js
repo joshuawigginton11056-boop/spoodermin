@@ -34,10 +34,29 @@ export const PLAYER = {
 // ---------------------------------------------------------------- webbing
 export const WEB = {
   MAX_LENGTH: 110, // how far a swing line can reach
-  MIN_LENGTH: 6,
+  // Shortest the line can ever get. A rope of a few metres is a pirouette, not
+  // a swing — this is the floor that keeps arcs wide.
+  MIN_LENGTH: 18,
   REEL_SPEED: 14, // rope shortening while holding the swing button
-  SWING_ACCEL: 30, // player steering force mid-swing
-  RELEASE_BOOST: 1.06,
+  SWING_ACCEL: 34, // player steering force mid-swing
+  // Gravity while hanging on a line. Walking gravity is 30 — three times
+  // Earth's — which is right for a punchy jump and completely wrong for an
+  // arc: it drops you out of every swing before it has finished. Lighter here
+  // is what turns a plummet into a glide, and it takes the top speed down with
+  // it, because a swing's speed is bought with height.
+  SWING_GRAVITY: 16,
+  // Drag along the arc, per second. A soft ceiling reads better than a clamp:
+  // speed settles at a cruise instead of pinning.
+  SWING_DRAG: 0.16,
+  // The bottom of an arc sits at (anchor height - rope length). Fire a long
+  // line at a low anchor and that lands under the pavement, which is why
+  // swings kept ending in a scrape along the street. The line quietly takes up
+  // slack until the arc clears this much ground.
+  GROUND_CLEARANCE: 13,
+  RELEASE_BOOST: 1.04,
+  // Letting go converts a slice of the swing into lift, so a release carries
+  // you up into the next arc rather than dumping you in the street.
+  RELEASE_LIFT: 11,
   ZIP_SPEED: 62, // web-zip pull speed
   ZIP_ARRIVE: 5,
 };

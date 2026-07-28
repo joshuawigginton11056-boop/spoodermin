@@ -18,9 +18,12 @@ const CAM_DISTANCES = [9.5, 14, 6];
 const MAX_SUBSTEP = 1 / 90;
 const MAX_SUBSTEPS = 8;
 // Tangential speed-up per second of swinging, replacing a per-frame multiplier
-// that used to hand out more speed the higher your frame rate was.
-const SWING_PUMP = 1.22;
-const SWING_MAX_SPEED = 95;
+// that used to hand out more speed the higher your frame rate was. Kept gentle:
+// a pendulum already converts height into speed, and stacking a fat multiplier
+// on top of that is what turned a glide into a 300km/h slingshot.
+const SWING_PUMP = 1.07;
+// Cruising ceiling. Sprinting is 21m/s, so this still reads as flying.
+const SWING_MAX_SPEED = 46;
 // How much of the outward velocity a taut line takes away in one step. A hair
 // under one gives the rope a little give, so catching a line halfway through a
 // fall lands as a firm tug over two or three frames instead of a single jolt.
@@ -32,9 +35,18 @@ const ROPE_MAX_PULL = 55;
 const CAM_PROBES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55]];
 // Aim-assist cone for finding a swing anchor: (extra pitch, yaw offset) pairs.
 const ANCHOR_CONE = [];
-for (const up of [0.35, 0.6, 0.9, 1.3]) {
-  for (const side of [0, 0.25, -0.25, 0.5, -0.5]) ANCHOR_CONE.push([up, side]);
+for (const up of [0, 0.35, 0.6, 0.9, 1.3]) {
+  for (const side of [0, 0.25, -0.25, 0.5, -0.5, 0.8, -0.8]) ANCHOR_CONE.push([up, side]);
 }
+// What makes a line worth swinging on. Anchoring to the wall at head height
+// gives a five-metre rope and a violent little pirouette at street level —
+// technically a swing, but it is where "too fast and going nowhere" came from.
+const ANCHOR_MIN_RISE = 12; // the anchor has to be properly overhead
+const ANCHOR_MIN_DIST = 26; // and far enough away to arc on
+// Relaxed pass, used only when the good kind of anchor is nowhere to be found,
+// so the web still fires rather than failing silently.
+const ANCHOR_FALLBACK_RISE = 4;
+const ANCHOR_FALLBACK_DIST = 12;
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -156,23 +168,56 @@ export class LocalPlayer {
   }
 
   // ------------------------------------------------------------- webbing
+  /**
+   * Sweeps a cone around the look direction and keeps the *best* anchor rather
+   * than the first one found. High and far beats near and low: that is the
+   * difference between arcing across a street and pirouetting around a doorway.
+   */
   findAnchor() {
     const from = this.eye(_v2);
     const dir = this.lookDir(_v3);
-    const hit = this.world.raycast(from, dir, WEB.MAX_LENGTH * 1.3);
-    if (hit && hit.point.y > this.pos.y + 1.5 && hit.normal.y < 0.85) return _v5.copy(hit.point);
+    let best = -Infinity;
+    let found = false;
 
-    // Aim assist: sweep a cone up and around the look direction so a casual
-    // flick still finds a corner to swing from.
-    for (const [up, side] of ANCHOR_CONE) {
-      const d = _v4.copy(dir);
-      d.y += up;
-      d.applyAxisAngle(UP, side);
-      d.normalize();
-      const h = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.25);
-      if (h && h.point.y > this.pos.y + 6 && h.normal.y < 0.9) return _v5.copy(h.point);
-    }
-    return null;
+    const sweep = (minRise, minDist) => {
+      for (let i = -1; i < ANCHOR_CONE.length; i++) {
+        const d = _v4.copy(dir);
+        if (i >= 0) {
+          d.y += ANCHOR_CONE[i][0];
+          d.applyAxisAngle(UP, ANCHOR_CONE[i][1]);
+          d.normalize();
+        }
+        const h = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.3);
+        if (!h) continue;
+        if (h.normal.y > 0.9) continue; // a floor is not something to hang from
+
+        // Run the line up the face to the roofline rather than sticking it
+        // wherever the ray happened to touch. Hitting a wall at chest height
+        // is what buried the whole game at street level: a low anchor is a
+        // short rope, and a short rope is a spin, not a swing.
+        const dx = h.point.x - this.pos.x;
+        const dz = h.point.z - this.pos.z;
+        const horiz = Math.hypot(dx, dz);
+        let y = h.point.y;
+        if (h.box) {
+          const reachUp = Math.sqrt(Math.max(0, WEB.MAX_LENGTH * WEB.MAX_LENGTH - horiz * horiz));
+          y = Math.min(h.box.y + h.box.hh - 0.6, this.pos.y + reachUp);
+          if (y < h.point.y) y = h.point.y;
+        }
+
+        const rise = y - this.pos.y;
+        const dist = Math.hypot(horiz, rise);
+        if (rise < minRise || dist < minDist) continue;
+        // Height matters more than reach — altitude is what the next swing
+        // spends, so a line that lifts you keeps the whole run going.
+        const score = rise * 1.6 + dist;
+        if (score > best) { best = score; _v5.set(h.point.x, y, h.point.z); found = true; }
+      }
+    };
+
+    sweep(ANCHOR_MIN_RISE, ANCHOR_MIN_DIST);
+    if (!found) sweep(ANCHOR_FALLBACK_RISE, ANCHOR_FALLBACK_DIST);
+    return found ? _v5 : null;
   }
 
   startSwing() {
@@ -182,7 +227,9 @@ export class LocalPlayer {
       return false;
     }
     this.anchor = a.clone();
-    this.ropeLen = Math.max(WEB.MIN_LENGTH, this.pos.distanceTo(this.anchor) * 0.98);
+    // Hang on exactly the length that was fired, so the line goes taut as the
+    // arc reaches it instead of pre-tensioned and yanking on contact.
+    this.ropeLen = THREE.MathUtils.clamp(this.pos.distanceTo(this.anchor), WEB.MIN_LENGTH, WEB.MAX_LENGTH);
     this.state = STATE.SWING;
     this.swingTime = 0;
     // Launching from a standstill: give a hop so the line actually lifts you
@@ -206,7 +253,11 @@ export class LocalPlayer {
     this.anchor = null;
     if (boost) {
       this.vel.multiplyScalar(WEB.RELEASE_BOOST);
-      this.vel.y += 1.5;
+      // Lift scaled by how fast the arc was going, so a good swing throws you
+      // upward into the next one. A flat nudge was worth nothing against a
+      // gravity of 30 and left every release sinking towards the street.
+      const hs = Math.hypot(this.vel.x, this.vel.z);
+      this.vel.y += Math.min(WEB.RELEASE_LIFT, 2 + hs * 0.32);
     }
     this.state = STATE.AIR;
     this.fx?.cutWeb();
@@ -411,14 +462,22 @@ export class LocalPlayer {
   stepSwing(dt, wx, wz) {
     if (!this.anchor) { this.state = STATE.AIR; return; }
     this.swingTime += dt;
-    this.vel.y -= GRAVITY * dt;
+    this.vel.y -= WEB.SWING_GRAVITY * dt;
 
-    // Reel in for altitude / speed.
-    if (this.input.down('KeyC') || this.input.down('KeyW')) {
+    // Reel in for altitude / speed — on C alone. W used to do this too, and
+    // since holding W is just "forward", every swing quietly wound itself down
+    // to the minimum rope: a shorter line at the same energy means a tighter,
+    // faster spin, which is most of why swinging ran away from the player.
+    if (this.input.down('KeyC')) {
       this.ropeLen = Math.max(WEB.MIN_LENGTH, this.ropeLen - WEB.REEL_SPEED * dt);
     }
-    if (this.input.down('KeyS')) {
-      this.ropeLen = Math.min(WEB.MAX_LENGTH, this.ropeLen + WEB.REEL_SPEED * dt);
+
+    // Take up slack so the bottom of the arc stays above the street. Done as a
+    // steady reel rather than a clamp at fire time, so it reads as the line
+    // pulling tight through the swing instead of a yank the moment it sticks.
+    const safe = Math.max(WEB.MIN_LENGTH, this.anchor.y - WEB.GROUND_CLEARANCE);
+    if (this.ropeLen > safe) {
+      this.ropeLen = Math.max(safe, this.ropeLen - WEB.REEL_SPEED * 1.6 * dt);
     }
 
     // Steering: push along the tangent of the arc.
@@ -456,6 +515,8 @@ export class LocalPlayer {
       if (sp > 1 && sp < SWING_MAX_SPEED) this.vel.multiplyScalar(Math.pow(SWING_PUMP, dt));
     }
 
+    // Soft ceiling, then a hard one as a backstop.
+    this.vel.multiplyScalar(Math.max(0, 1 - WEB.SWING_DRAG * dt));
     const sp = this.vel.length();
     if (sp > SWING_MAX_SPEED) this.vel.multiplyScalar(SWING_MAX_SPEED / sp);
 

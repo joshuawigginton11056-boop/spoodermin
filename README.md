@@ -48,8 +48,7 @@ without other humans.
 | `Space` | Jump — or wall-jump off a building, or cut loose from a swing with a boost |
 | **Left click** | Fire a web ball (damages enemies) |
 | **Right click (hold)** | Shoot a web line and swing. Release to let go and keep your momentum |
-| `W` / `C` while swinging | Reel the line in — shorter rope, faster arc |
-| `S` while swinging | Pay the line out |
+| `C` while swinging | Reel the line in — shorter rope, faster arc |
 | `E` | Web-zip: yank yourself straight to whatever the crosshair is on |
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
@@ -139,6 +138,16 @@ projectiles and their hits, storm damage, eliminations, placements — is owned 
 the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
+
+**Swinging** is tuned to glide rather than sprint. The line looks for the best
+anchor in a cone rather than the first thing it touches, and runs up the face of
+whatever it hits to the roofline — a wall at head height gives a five-metre rope
+and a pirouette, which is not a swing. Gravity on the line is lighter than
+walking gravity, because an arc bought at 30m/s² is over before it starts;
+letting go converts part of the arc into lift so you carry into the next one;
+and the line takes up slack on its own so the bottom of the arc clears the
+street. `W` no longer reels the rope in — holding forward used to wind every
+swing down to the shortest rope, which is what made it run away from you.
 
 **Frame-rate independence.** The player is simulated in sub-steps of at most
 1/90 s, and every rate — gravity, the swing's energy gain, camera easing — is
