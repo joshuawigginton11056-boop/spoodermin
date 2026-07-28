@@ -153,9 +153,9 @@ input.onLockChange = (locked) => {
   if (!locked && game.started) ui.status('paused — click to resume');
 };
 // Pointer lock can be refused (sandboxed iframe); say so once and explain the
-// cursor-steering fallback rather than leaving the player unable to turn.
+// fallback rather than leaving the player unable to turn.
 input.onFreeLook = () => {
-  ui.toast('MOUSE-LOOK MODE', 'Steer by moving the cursor away from the centre', 5);
+  ui.toast('MOUSE-LOOK MODE', 'Aim with the crosshair — nudge the screen edge to keep turning', 5);
 };
 
 // ------------------------------------------------------------ net handlers

@@ -55,9 +55,12 @@ without other humans.
 | `V` | Cycle camera distance |
 | `Esc` | Release the mouse (click the canvas to grab it again) |
 
-If the browser refuses pointer lock — a sandboxed iframe, for instance — the
-game says so and switches to cursor steering: the further the cursor sits from
-the middle of the screen, the faster you turn. Everything else is unchanged.
+You always aim with the crosshair in the middle of the screen. If the browser
+refuses pointer lock — a sandboxed iframe, for instance — the game says so and
+hides the system cursor instead, turning by however far you move the mouse just
+like pointer lock does. The one difference: the cursor cannot travel past the
+window, so pushing it into the thin band at the edge of the screen keeps
+turning at a steady rate. Everything else is unchanged.
 
 **Wall-crawling:** hold a movement key into a wall while airborne and you stick
 to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.

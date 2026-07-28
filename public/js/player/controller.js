@@ -12,6 +12,18 @@ const CAM_DISTANCES = [9.5, 14, 6];
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
+const _probeFrom = new THREE.Vector3();
+const _probeDir = new THREE.Vector3();
+
+// Look sensitivity, radians per mouse pixel.
+const LOOK_SENS = 0.0022;
+// A dropped frame or an alt-tab can deliver a huge accumulated delta; cap it
+// so a hiccup never whips the view around.
+const MAX_LOOK_STEP = 600;
+
+// Camera boom probes: centre, plus four offsets so the camera does not slice
+// through corners and railings.
+const CAM_PROBES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55]];
 
 export class LocalPlayer {
   constructor({ scene, camera, world, input, skin, onShoot, onZip, fx }) {
@@ -52,6 +64,7 @@ export class LocalPlayer {
     this.clingNormal = null;
 
     this.camDist = 0;
+    this.camBoom = CAM_DISTANCES[0]; // current boom length, the only damped part
     this.camPos = new THREE.Vector3(0, 70, 20);
     this.camLook = new THREE.Vector3();
     this.fov = 70;
@@ -73,6 +86,7 @@ export class LocalPlayer {
     this.health = COMBAT.MAX_HEALTH;
     this.fluid = COMBAT.FLUID_MAX;
     this.hero.root.visible = true;
+    this.camBoom = CAM_DISTANCES[this.camDist];
     this.camPos.copy(this.pos).add(new THREE.Vector3(0, 6, 12));
   }
 
@@ -200,7 +214,9 @@ export class LocalPlayer {
     // so close-range shots do not fly wide of the reticle.
     const dir = _v.copy(this.aimPoint).sub(muzzle).normalize().clone();
     this.onShoot?.(muzzle, dir);
-    this.shake = Math.min(0.5, this.shake + 0.12);
+    // Light: recoil shake is world-space camera jitter, so a heavy one throws
+    // off the very reticle you are trying to hold on a target.
+    this.shake = Math.min(0.26, this.shake + 0.055);
   }
 
   // ------------------------------------------------------------- the loop
@@ -210,14 +226,15 @@ export class LocalPlayer {
 
     // ---- look
     // Positive pitch parks the camera above the hero, i.e. looking down.
-    const sens = 0.0022;
-    this.yaw -= m.dx * sens;
-    this.pitch += m.dy * sens;
+    const dx = THREE.MathUtils.clamp(m.dx, -MAX_LOOK_STEP, MAX_LOOK_STEP);
+    const dy = THREE.MathUtils.clamp(m.dy, -MAX_LOOK_STEP, MAX_LOOK_STEP);
+    this.yaw -= dx * LOOK_SENS;
+    this.pitch += dy * LOOK_SENS;
     this.pitch = THREE.MathUtils.clamp(this.pitch, -1.15, 1.25);
     if (input.hit('KeyV')) this.camDist = (this.camDist + 1) % CAM_DISTANCES.length;
 
     if (!this.alive) {
-      this.updateCamera(dt, true);
+      this.updateCamera(dt);
       return;
     }
 
@@ -327,7 +344,7 @@ export class LocalPlayer {
     this.pos.z = THREE.MathUtils.clamp(this.pos.z, -lim, lim);
 
     this.updateHero(dt);
-    this.updateCamera(dt, false);
+    this.updateCamera(dt);
     this.updateAim();
 
     // Crosshair feedback: is there something swingable out there?
@@ -475,10 +492,16 @@ export class LocalPlayer {
     });
   }
 
-  updateCamera(dt, dead) {
+  updateCamera(dt) {
     const targetDist = CAM_DISTANCES[this.camDist];
-    const head = _v.copy(this.pos);
-    head.y += PLAYER.EYE;
+    // The orbit pivot is the head itself, with nothing smoothing it. Easing the
+    // camera's *position* towards where the yaw/pitch want it — the old
+    // behaviour — is what made the world slide out from under a crosshair that
+    // is nailed to the middle of the screen: the view kept swinging for a
+    // couple of hundred milliseconds after the mouse had stopped. Rotation is
+    // now rigid, and only the boom length is damped.
+    const pivot = _v.copy(this.pos);
+    pivot.y += PLAYER.EYE;
 
     const dir = _v2.set(
       Math.sin(this.yaw) * Math.cos(this.pitch),
@@ -486,37 +509,39 @@ export class LocalPlayer {
       Math.cos(this.yaw) * Math.cos(this.pitch)
     );
 
-    // Pull the camera in if a building is in the way. Four offset probes around
-    // the centre ray stop the camera from slicing through corners and railings.
+    // Pull the camera in if a building is in the way.
     let dist = targetDist;
     const side = _v3.set(dir.z, 0, -dir.x).normalize();
-    const probes = [
-      [0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55],
-    ];
-    const from = new THREE.Vector3();
-    const d = dir.clone();
-    for (const [su, sv] of probes) {
-      from.copy(head).addScaledVector(side, su).add(new THREE.Vector3(0, sv, 0));
-      const hit = this.world.raycast(from, d, targetDist + 1.4);
+    _probeDir.copy(dir);
+    for (const [su, sv] of CAM_PROBES) {
+      _probeFrom.copy(pivot).addScaledVector(side, su);
+      _probeFrom.y += sv;
+      const hit = this.world.raycast(_probeFrom, _probeDir, targetDist + 1.4);
       if (hit) dist = Math.min(dist, Math.max(2.6, hit.dist - 1.1));
     }
+    // Snap in the instant something is in the way — clipping through a wall is
+    // worse than a hard cut — and ease back out once it is clear.
+    if (dist < this.camBoom) this.camBoom = dist;
+    else this.camBoom += (dist - this.camBoom) * (1 - Math.exp(-dt / 0.22));
+
     // Once the camera is right on top of the hero, hide the model so the view
     // is not filled with the inside of a shoulder.
-    this.hero.root.visible = this.alive && dist > 3.4;
+    this.hero.root.visible = this.alive && this.camBoom > 3.4;
 
-    const want = _v3.copy(head).addScaledVector(dir, dist);
-    const k = 1 - Math.pow(0.0008, dt);
-    this.camPos.lerp(want, dead ? k * 0.5 : k);
+    this.camPos.copy(pivot).addScaledVector(dir, this.camBoom);
     this.camera.position.copy(this.camPos);
 
-    // Aim straight at the hero's head: this makes the camera's forward vector
-    // exactly the analytic look direction the crosshair is built from.
-    this.camLook.copy(head);
+    // Look back down the same axis we orbited on, so the camera's forward
+    // vector is exactly the analytic look direction the crosshair is built
+    // from — the reticle and the shot always agree.
+    this.camLook.copy(pivot);
     this.camera.lookAt(this.camLook);
 
-    // Speed FOV + a touch of shake.
-    const targetFov = 70 + THREE.MathUtils.clamp((this.speed - 16) * 0.55, 0, 26);
-    this.fov += (targetFov - this.fov) * Math.min(1, dt * 4);
+    // Speed FOV + a touch of shake. Kept modest: a wide FOV punch is its own
+    // kind of drift, warping the edges of the frame while you are trying to
+    // track something with a fixed reticle.
+    const targetFov = 70 + THREE.MathUtils.clamp((this.speed - 22) * 0.4, 0, 13);
+    this.fov += (targetFov - this.fov) * (1 - Math.exp(-dt / 0.35));
     this.camera.fov = this.fov;
     if (this.shake > 0.001) {
       this.shake *= Math.pow(0.02, dt);

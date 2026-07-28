@@ -12,6 +12,40 @@ const STATE = { IDLE: 0, RUN: 1, AIR: 2, SWING: 3, CLING: 4, ZIP: 5 };
 
 let nextEntityId = 1;
 
+/**
+ * Bots get a personality rolled once, at creation. A lobby of identical
+ * pinpoint shooters is not an opponent, it is a timer — so most of a bot's
+ * threat is meant to come from *where* it is, not from perfect aim. Every one
+ * of them has to spot you before it opens up, fires in bursts with a breather
+ * in between, and sprays a cone that widens with range and with how fast
+ * either of you is moving.
+ */
+function makeBotBrain() {
+  const skill = Math.random(); // 0 = rookie, 1 = the one you remember
+  return {
+    target: null,
+    think: 0,
+    wander: [0, 0, 0],
+    jumpAt: 0,
+    strafe: 1,
+    skill,
+    // Seconds of unbroken line of sight before the first shot.
+    reaction: 0.75 - skill * 0.4,
+    aimTime: 0,
+    // Width of the miss cone at point-blank, in radians. Widened below by
+    // distance and by movement.
+    aimError: 0.15 - skill * 0.07,
+    // Fraction of the target's velocity the bot actually leads by. Rookies
+    // shoot where you were.
+    lead: 0.3 + skill * 0.5,
+    // Furthest it will bother shooting at all.
+    range: 58 + skill * 30,
+    fireDelay: 0,
+    burst: 0,
+    burstSize: 2 + Math.floor(skill * 3),
+  };
+}
+
 export class Room {
   constructor(id = 'main') {
     this.id = id;
@@ -76,7 +110,7 @@ export class Room {
       slowUntil: 0,
       lastSeen: Date.now(),
       // bot brain
-      bot: isBot ? { target: null, think: 0, wander: [0, 0, 0], jumpAt: 0, strafe: 1 } : null,
+      bot: isBot ? makeBotBrain() : null,
     };
     this.players.set(id, p);
     return p;
@@ -391,11 +425,18 @@ export class Room {
       for (const o of this.players.values()) {
         if (o === p || !o.alive) continue;
         const d = Math.hypot(o.pos[0] - p.pos[0], o.pos[1] - p.pos[1], o.pos[2] - p.pos[2]);
-        // Bots care much more about humans; keeps the action pointed at you.
-        const weight = o.isBot ? d * 1.5 : d * 0.7;
+        // Bots lean towards humans so the action stays pointed at you.
+        let weight = o.isBot ? d * 1.4 : d * 0.75;
+        // Stickiness: switching targets throws away the time already spent
+        // lining this one up, so it takes a clearly better option. Without it
+        // they flip-flop on every think and never finish acquiring anybody.
+        if (o.id === b.target) weight *= 0.6;
         if (weight < bestD) { bestD = weight; best = o; }
       }
-      b.target = best ? best.id : null;
+      const nextTarget = best ? best.id : null;
+      // A new face has to be acquired from scratch.
+      if (nextTarget !== b.target) b.aimTime = 0;
+      b.target = nextTarget;
       b.strafe = Math.random() < 0.5 ? -1 : 1;
       if (!best) {
         const ang = Math.random() * Math.PI * 2;
@@ -483,33 +524,52 @@ export class Room {
     p.pos[0] = nx; p.pos[1] = ny; p.pos[2] = nz;
     p.state = !p.grounded ? STATE.AIR : (Math.hypot(p.vel[0], p.vel[2]) > 1.5 ? STATE.RUN : STATE.IDLE);
 
-    // Fire at the target if roughly lined up and nothing solid is in between.
+    // Fire at the target if it has been in the open long enough, is in range,
+    // and nothing solid is in between.
+    b.fireDelay -= dt;
+    let engaged = false;
     if (target && target.alive && p.fluid > COMBAT.FLUID_PER_SHOT * 2) {
       const eye = [p.pos[0], p.pos[1] + PLAYER.EYE * 0.8, p.pos[2]];
       const tc = [target.pos[0], target.pos[1] + PLAYER.HEIGHT * 0.55, target.pos[2]];
       const dx = tc[0] - eye[0], dy = tc[1] - eye[1], dz = tc[2] - eye[2];
       const dist = Math.hypot(dx, dy, dz);
-      if (dist < 95) {
+      if (dist < b.range) {
         const dir = [dx / dist, dy / dist, dz / dist];
-        const hit = raycastCity(this.city.colliders, eye, dir, dist);
-        if (!hit) {
-          // Lead the shot and add a miss cone so bots are beatable.
-          const flight = dist / COMBAT.SHOT_SPEED;
-          const lead = [
-            tc[0] + target.vel[0] * flight * 0.8,
-            tc[1] + target.vel[1] * flight * 0.5 + COMBAT.SHOT_GRAVITY * flight * flight * 0.5,
-            tc[2] + target.vel[2] * flight * 0.8,
-          ];
-          let ax = lead[0] - eye[0], ay = lead[1] - eye[1], az = lead[2] - eye[2];
-          const al = Math.hypot(ax, ay, az) || 1;
-          const spread = 0.035 + dist / 1400;
-          ax = ax / al + (Math.random() - 0.5) * spread;
-          ay = ay / al + (Math.random() - 0.5) * spread;
-          az = az / al + (Math.random() - 0.5) * spread;
-          this.handleShoot(p, eye, [ax, ay, az]);
-        }
+        engaged = !raycastCity(this.city.colliders, eye, dir, dist);
+      }
+
+      // Acquisition time. Opening fire the frame you round a corner is what
+      // reads as an aimbot, however wide the cone afterwards is.
+      if (engaged) b.aimTime += dt;
+      if (engaged && b.aimTime >= b.reaction && b.fireDelay <= 0) {
+        const flight = dist / COMBAT.SHOT_SPEED;
+        const lead = [
+          tc[0] + target.vel[0] * flight * b.lead,
+          tc[1] + target.vel[1] * flight * b.lead * 0.7 + COMBAT.SHOT_GRAVITY * flight * flight * 0.5,
+          tc[2] + target.vel[2] * flight * b.lead,
+        ];
+        let ax = lead[0] - eye[0], ay = lead[1] - eye[1], az = lead[2] - eye[2];
+        const al = Math.hypot(ax, ay, az) || 1;
+        // The cone opens up with range and with movement on either end, so
+        // distance and momentum are both real defences.
+        const tSpeed = Math.hypot(target.vel[0], target.vel[1], target.vel[2]);
+        const ownSpeed = Math.hypot(p.vel[0], p.vel[2]);
+        const spread = b.aimError * (1 + dist / 55) + tSpeed * 0.003 + ownSpeed * 0.002;
+        ax = ax / al + (Math.random() - 0.5) * spread;
+        ay = ay / al + (Math.random() - 0.5) * spread;
+        az = az / al + (Math.random() - 0.5) * spread;
+        this.handleShoot(p, eye, [ax, ay, az]);
+
+        // Bursts with a breather, rather than a metronome at the fire-rate cap.
+        if (b.burst <= 0) b.burst = b.burstSize;
+        b.burst--;
+        b.fireDelay = b.burst > 0
+          ? COMBAT.FIRE_COOLDOWN + 0.06 + Math.random() * 0.12
+          : 0.95 - b.skill * 0.35 + Math.random() * 0.5;
       }
     }
+    // Losing sight of someone costs most, but not all, of the acquisition.
+    if (!engaged) b.aimTime = Math.max(0, b.aimTime - dt * 1.5);
   }
 
   // ------------------------------------------------------------------ loop

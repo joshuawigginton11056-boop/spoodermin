@@ -2,8 +2,15 @@
 //
 // Pointer lock is the good path. Some embedding contexts (a sandboxed iframe
 // without the pointer-lock permission, for instance) refuse it, so there is a
-// steer-with-the-cursor fallback that keeps the game fully playable: the
-// further the cursor sits from the middle of the canvas, the faster you turn.
+// fallback that keeps the game fully playable. The fallback hides the system
+// cursor and turns by how far the hand actually moved, exactly like pointer
+// lock does, so the crosshair in the middle of the screen stays the one and
+// only aiming point. The only extra is a thin band at the border of the
+// canvas: the cursor cannot travel past the window, so parking it there keeps
+// turning at a steady rate and you can still spin all the way round.
+
+// Turn rate, in mouse-pixels per second, while the cursor is pinned to an edge.
+const EDGE_TURN = 900;
 
 export class Input {
   constructor(canvas) {
@@ -11,7 +18,7 @@ export class Input {
     this.keys = new Set();
     this.pressed = new Set(); // edge-triggered, cleared each frame
     this.mouse = { dx: 0, dy: 0, left: false, right: false, leftEdge: false, rightEdge: false, wheel: 0 };
-    this.cursor = { x: 0, y: 0 };
+    this.cursor = { x: 0, y: 0, seen: false };
     this.pointerLocked = false;
     this.freeLook = false;
     this.active = false; // controls engaged, by either method
@@ -19,6 +26,7 @@ export class Input {
     this.onLockChange = null;
     this.onFreeLook = null;
     this._lockProbe = null;
+    this._lastClient = null; // previous cursor position, for free-look deltas
 
     addEventListener('keydown', (e) => {
       if (e.repeat) return;
@@ -49,14 +57,29 @@ export class Input {
       const r = canvas.getBoundingClientRect();
       this.cursor.x = e.clientX - r.left;
       this.cursor.y = e.clientY - r.top;
-      if (!this.pointerLocked) return;
-      this.mouse.dx += e.movementX || 0;
-      this.mouse.dy += e.movementY || 0;
+      this.cursor.seen = true;
+      if (this.pointerLocked) {
+        this._lastClient = null;
+        this.mouse.dx += e.movementX || 0;
+        this.mouse.dy += e.movementY || 0;
+        return;
+      }
+      // Free-look turns by the distance the hand travelled since the last
+      // event. Steering off a fixed offset from the centre instead — the old
+      // behaviour — means the view keeps rotating for as long as the cursor is
+      // parked off-centre, which reads as the camera drifting on its own.
+      // movementX is not dependable outside pointer lock, so measure it here.
+      const prev = this._lastClient;
+      this._lastClient = { x: e.clientX, y: e.clientY };
+      if (!this.freeLook || !this.active || !prev) return;
+      this.mouse.dx += e.clientX - prev.x;
+      this.mouse.dy += e.clientY - prev.y;
     });
 
     document.addEventListener('pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === canvas;
       clearTimeout(this._lockProbe);
+      this._lastClient = null;
       if (this.pointerLocked) {
         this.freeLook = false;
         this.active = true;
@@ -65,8 +88,19 @@ export class Input {
         this.keys.clear();
         this.mouse.left = this.mouse.right = false;
       }
+      this.syncCursorStyle();
       if (this.onLockChange) this.onLockChange(this.active);
     });
+  }
+
+  /**
+   * The system cursor is hidden whenever free-look has the controls, so the
+   * centred crosshair is the only thing on screen that means "you are aiming
+   * here". It comes back the moment the controls are released so menus and
+   * buttons stay clickable.
+   */
+  syncCursorStyle() {
+    this.canvas.style.cursor = this.freeLook && this.active ? 'none' : '';
   }
 
   /** Back-compat alias: "are the controls engaged?" */
@@ -74,7 +108,8 @@ export class Input {
   set locked(v) { this.active = !!v; }
 
   lock() {
-    if (this.freeLook) { this.active = true; return; }
+    this._lastClient = null;
+    if (this.freeLook) { this.active = true; this.syncCursorStyle(); return; }
     const el = this.canvas;
     if (!el.requestPointerLock) { this.useFreeLook(); return; }
 
@@ -117,10 +152,11 @@ export class Input {
   }
 
   useFreeLook() {
-    if (this.freeLook) { this.active = true; return; }
+    this._lastClient = null;
+    if (this.freeLook) { this.active = true; this.syncCursorStyle(); return; }
     this.freeLook = true;
     this.active = true;
-    this.canvas.style.cursor = 'crosshair';
+    this.syncCursorStyle();
     if (this.onFreeLook) this.onFreeLook();
     if (this.onLockChange) this.onLockChange(true);
   }
@@ -131,6 +167,7 @@ export class Input {
       this.active = false;
       this.keys.clear();
       this.mouse.left = this.mouse.right = false;
+      this.syncCursorStyle();
       if (this.onLockChange) this.onLockChange(false);
     }
   }
@@ -138,19 +175,27 @@ export class Input {
   down(code) { return this.keys.has(code); }
   hit(code) { return this.pressed.has(code); }
 
-  /** Synthesises look deltas for the cursor-steering fallback. */
+  /**
+   * Free-look only: the hidden cursor cannot leave the window, so once it is
+   * pinned against a border there is no travel left to turn with. Keep turning
+   * while it sits in that thin band. Anywhere else — the whole middle of the
+   * screen — a still hand means a still view.
+   */
   beginFrame(dt) {
-    if (!this.freeLook || !this.active) return;
+    if (!this.freeLook || !this.active || !this.cursor.seen) return;
     const r = this.canvas.getBoundingClientRect();
-    const ox = this.cursor.x - r.width / 2;
-    const oy = this.cursor.y - r.height / 2;
-    const mag = Math.hypot(ox, oy);
-    const dead = Math.min(r.width, r.height) * 0.07;
-    if (mag <= dead) return;
-    // Ramp from the edge of the dead zone so small nudges stay gentle.
-    const gain = ((mag - dead) / mag) * 2.0 * dt;
-    this.mouse.dx += ox * gain;
-    this.mouse.dy += oy * gain;
+    if (!r.width || !r.height) return;
+    const band = Math.max(28, Math.min(r.width, r.height) * 0.06);
+    const push = (v, size) => {
+      if (v < band) return Math.max(-1, (v - band) / band);
+      if (v > size - band) return Math.min(1, (v - (size - band)) / band);
+      return 0;
+    };
+    const ex = push(this.cursor.x, r.width);
+    const ey = push(this.cursor.y, r.height);
+    if (!ex && !ey) return;
+    this.mouse.dx += ex * EDGE_TURN * dt;
+    this.mouse.dy += ey * EDGE_TURN * 0.6 * dt;
   }
 
   endFrame() {
