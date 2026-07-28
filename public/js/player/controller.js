@@ -153,16 +153,57 @@ export class LocalPlayer {
     return out.set(this.pos.x, this.pos.y + PLAYER.EYE, this.pos.z);
   }
 
+  /**
+   * Where the crosshair is pointing. Under pointer lock that is the middle of
+   * the view, so it falls out of yaw and pitch. Steering by cursor, the cursor
+   * *is* the crosshair: the ray goes through that exact pixel, so what you
+   * point at and what you hit are the same thing with nothing in between.
+   */
+  aimDir(out = _v) {
+    const inp = this.input;
+    if (!inp.absoluteAim) return this.lookDir(out);
+    const r = inp.canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return this.lookDir(out);
+    out.set(
+      (inp.cursor.x / r.width) * 2 - 1,
+      -((inp.cursor.y / r.height) * 2 - 1),
+      0.5
+    );
+    out.unproject(this.camera).sub(this.camera.position);
+    const len = out.length();
+    if (!len || !Number.isFinite(len)) return this.lookDir(out);
+    return out.divideScalar(len);
+  }
+
+  /** Direction from the hero's own eye to whatever the crosshair is sitting on. */
+  aimRayDir(out = _v3) {
+    return out.copy(this.aimPoint).sub(this.eye(_v2)).normalize();
+  }
+
   updateAim() {
-    const dir = this.lookDir(_v3);
-    const from = this.eye(_v2);
-    const hit = this.world.raycast(from, dir, 400);
-    if (hit) {
-      this.aimPoint.copy(hit.point);
-      this.aimDist = hit.dist;
+    if (this.input.absoluteAim) {
+      // The crosshair is a pixel on the screen, so the ray that decides what it
+      // is pointing at has to leave the camera through that same pixel. Firing
+      // it from the hero's eye instead leaves the two parallaxed apart — dead
+      // on in the middle of the screen and most of a hundred pixels out at the
+      // corners, which is a crosshair that quietly points at the wrong thing.
+      const dir = this.aimDir(_v3);
+      const from = _v4.copy(this.camera.position);
+      const hit = this.world.raycast(from, dir, 500);
+      if (hit) this.aimPoint.copy(hit.point);
+      else this.aimPoint.copy(from).addScaledVector(dir, 500);
+      this.aimDist = this.aimPoint.distanceTo(this.eye(_v2));
     } else {
-      this.aimPoint.copy(from).addScaledVector(dir, 400);
-      this.aimDist = Infinity;
+      const dir = this.lookDir(_v3);
+      const from = this.eye(_v2);
+      const hit = this.world.raycast(from, dir, 400);
+      if (hit) {
+        this.aimPoint.copy(hit.point);
+        this.aimDist = hit.dist;
+      } else {
+        this.aimPoint.copy(from).addScaledVector(dir, 400);
+        this.aimDist = Infinity;
+      }
     }
     // The crosshair's "you can swing from that" state falls out of the aim ray
     // we already cast, instead of costing a second one every frame. Anything
@@ -179,7 +220,7 @@ export class LocalPlayer {
    */
   findAnchor() {
     const from = this.eye(_v2);
-    const dir = this.lookDir(_v3);
+    const dir = this.aimRayDir(_v3);
 
     // Whatever the crosshair is actually on wins, wherever it is — a ledge, a
     // low wall, the underside of a highway. If you are pointing at something,
@@ -281,7 +322,7 @@ export class LocalPlayer {
 
   tryZip() {
     if (this.fluid < COMBAT.FLUID_PER_ZIP) return;
-    const dir = this.lookDir(_v3);
+    const dir = this.aimRayDir(_v3);
     const hit = this.world.raycast(this.eye(_v2), dir, WEB.MAX_LENGTH * 1.6);
     if (!hit) { this.fx?.miss(this.aimPoint); return; }
     this.fluid -= COMBAT.FLUID_PER_ZIP;
@@ -330,6 +371,12 @@ export class LocalPlayer {
       this.updateCamera(dt, true);
       return;
     }
+
+    // Resolve the crosshair before anything reads it, so a web fired this
+    // frame goes where the crosshair is now rather than where it was last
+    // frame. It is resolved again at the end, once the camera has moved, for
+    // the reticle to be drawn against.
+    this.updateAim();
 
     this.cooldown -= dt;
     this.fluid = Math.min(COMBAT.FLUID_MAX, this.fluid + COMBAT.FLUID_REGEN * dt);
@@ -668,6 +715,12 @@ export class LocalPlayer {
       this.camera.position.y += (Math.random() - 0.5) * s;
       this.camera.position.z += (Math.random() - 0.5) * s;
     }
+
+    // three only refreshes these inside render(). Aiming through a screen
+    // pixel has to unproject against the camera as it is right now, or the
+    // crosshair reports where you were pointing a frame ago.
+    this.camera.updateMatrixWorld();
+    this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
   }
 
   netState() {

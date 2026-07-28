@@ -24,6 +24,11 @@
 const REFUSALS_BEFORE_GIVING_UP = 3;
 // Don't hammer requestPointerLock while playing in the fallback.
 const RETRY_INTERVAL = 2000;
+// Cursor steering: how far out the cursor has to be, as a fraction of the
+// half-screen, before the view starts turning, and how fast it turns at full
+// deflection (in the same units as a mouse delta, so ~2 rad/s).
+const EDGE_TURN_FROM = 0.55;
+const EDGE_TURN_RATE = 900;
 
 export class Input {
   constructor(canvas) {
@@ -182,9 +187,12 @@ export class Input {
 
   useFreeLook() {
     this.active = true;
+    // The game draws its own reticle on the cursor, so the system one would
+    // just be a second pointer sitting next to it. It comes back the moment
+    // the controls are released, or there is nothing to aim the click with.
+    this.canvas.style.cursor = 'none';
     if (this.freeLook) return;
     this.freeLook = true;
-    this.canvas.style.cursor = 'crosshair';
     if (!this._announcedFreeLook) {
       this._announcedFreeLook = true;
       if (this.onFreeLook) this.onFreeLook();
@@ -197,6 +205,7 @@ export class Input {
     document.exitPointerLock?.();
     if (this.freeLook) {
       this.active = false;
+      this.canvas.style.cursor = '';
       this.clearHeld();
       if (this.onLockChange) this.onLockChange(false);
     }
@@ -205,19 +214,32 @@ export class Input {
   down(code) { return this.keys.has(code); }
   hit(code) { return this.pressed.has(code); }
 
-  /** Synthesises look deltas for the cursor-steering fallback. */
+  /**
+   * Is the cursor itself the aim, rather than a turn-rate control? True
+   * whenever pointer lock was refused and we are steering by cursor.
+   */
+  get absoluteAim() { return this.freeLook && this.active; }
+
+  /**
+   * Swings the view round when the cursor is pushed out to the edge of the
+   * screen. Aiming itself is absolute — the cursor *is* the crosshair — so
+   * this only has to cover turning past what is currently on screen, and it
+   * stays out of the way across the middle of the picture.
+   */
   beginFrame(dt) {
-    if (!this.freeLook || !this.active) return;
+    if (!this.absoluteAim) return;
     const r = this.canvas.getBoundingClientRect();
-    const ox = this.cursor.x - r.width / 2;
-    const oy = this.cursor.y - r.height / 2;
-    const mag = Math.hypot(ox, oy);
-    const dead = Math.min(r.width, r.height) * 0.07;
-    if (mag <= dead) return;
-    // Ramp from the edge of the dead zone so small nudges stay gentle.
-    const gain = ((mag - dead) / mag) * 2.0 * dt;
-    this.mouse.dx += ox * gain;
-    this.mouse.dy += oy * gain;
+    const nx = (this.cursor.x - r.width / 2) / (r.width / 2);
+    const ny = (this.cursor.y - r.height / 2) / (r.height / 2);
+    const past = (n) => {
+      const over = Math.abs(n) - EDGE_TURN_FROM;
+      return over <= 0 ? 0 : Math.sign(n) * Math.min(1, over / (1 - EDGE_TURN_FROM));
+    };
+    const ex = past(nx);
+    const ey = past(ny);
+    if (!ex && !ey) return;
+    this.mouse.dx += ex * EDGE_TURN_RATE * dt;
+    this.mouse.dy += ey * EDGE_TURN_RATE * dt;
   }
 
   endFrame() {
