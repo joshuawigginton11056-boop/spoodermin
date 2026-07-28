@@ -142,10 +142,14 @@ the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
 
-**Aiming** is one crosshair, always on the thing it will hit. It is not the
-middle of the screen: the camera eases into place behind the hero, so while you
-turn, the camera's forward direction and your aim are two different things and
-a reticle nailed to the centre quietly lies about where the web will go. It is
+**Aiming** is one crosshair, fixed dead centre, and the centre of the screen is
+exactly what the web hits. Two things make that true rather than approximately
+true: the camera takes its orientation straight from yaw and pitch instead of
+easing round to look at the hero, so its forward vector *is* your aim on every
+frame; and the aim ray leaves the camera rather than the hero's eye, since the
+camera sits nine metres back and the same direction from the two origins lands
+on different things. Only the camera's position eases, which is what makes the
+hero drift a little within the frame when you accelerate. The crosshair is
 resolved before anything reads it, so a web fired this frame goes where you are
 pointing now rather than where you were pointing last frame.
 

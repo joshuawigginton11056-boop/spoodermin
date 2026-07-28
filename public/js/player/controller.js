@@ -55,6 +55,7 @@ const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();
 const _v5 = new THREE.Vector3();
+const _euler = new THREE.Euler();
 const UP = new THREE.Vector3(0, 1, 0);
 
 export class LocalPlayer {
@@ -98,7 +99,6 @@ export class LocalPlayer {
 
     this.camDist = 0;
     this.camPos = new THREE.Vector3(0, 70, 20);
-    this.camLook = new THREE.Vector3();
     this.fov = 70;
     this.shake = 0;
 
@@ -136,10 +136,10 @@ export class LocalPlayer {
   get speed() { return Math.hypot(this.vel.x, this.vel.z); }
 
   // -------------------------------------------------------------- aiming
-  // Analytic look direction. The camera sits at head + offset(yaw,pitch) and
-  // looks back at the head, so this is exactly the camera's forward vector —
-  // but it stays correct even on the frames where the camera is still easing
-  // into place or has been pushed in by a wall.
+  // Analytic look direction, and the camera is oriented straight from the same
+  // yaw and pitch, so this is exactly the camera's forward vector — the middle
+  // of the screen — on every frame, including the ones where the camera's
+  // position is still easing into place or has been pushed in by a wall.
   lookDir(out = _v) {
     return out.set(
       -Math.sin(this.yaw) * Math.cos(this.pitch),
@@ -159,16 +159,18 @@ export class LocalPlayer {
   }
 
   updateAim() {
+    // The crosshair is fixed in the middle of the screen, so the ray that
+    // decides what it is on has to leave the camera along the camera's own
+    // forward vector. Casting it from the hero's eye instead is what put the
+    // two out of step: the camera sits nine metres back, so the same direction
+    // from the two origins lands on different things.
     const dir = this.lookDir(_v3);
-    const from = this.eye(_v2);
-    const hit = this.world.raycast(from, dir, 400);
-    if (hit) {
-      this.aimPoint.copy(hit.point);
-      this.aimDist = hit.dist;
-    } else {
-      this.aimPoint.copy(from).addScaledVector(dir, 400);
-      this.aimDist = Infinity;
-    }
+    const from = _v4.copy(this.camera.position);
+    const hit = this.world.raycast(from, dir, 500);
+    if (hit) this.aimPoint.copy(hit.point);
+    else this.aimPoint.copy(from).addScaledVector(dir, 500);
+    // Reach is still measured from the hero, who is the one throwing the web.
+    this.aimDist = this.aimPoint.distanceTo(this.eye(_v2));
     // The crosshair's "you can swing from that" state falls out of the aim ray
     // we already cast, instead of costing a second one every frame. Anything
     // within reach counts now that the web goes wherever it is pointed.
@@ -660,10 +662,14 @@ export class LocalPlayer {
     this.camPos.lerp(want, dead ? k * 0.5 : k);
     this.camera.position.copy(this.camPos);
 
-    // Aim straight at the hero's head: this makes the camera's forward vector
-    // exactly the analytic look direction the crosshair is built from.
-    this.camLook.copy(head);
-    this.camera.lookAt(this.camLook);
+    // Orientation comes straight from yaw and pitch, so the camera's forward
+    // vector *is* the look direction and the middle of the screen is exactly
+    // where you are aiming — no easing between the two, which is what lets the
+    // crosshair sit still in the centre and still tell the truth. Only the
+    // camera's position eases; pointing it back at the hero's head instead let
+    // the two drift apart every time you turned.
+    _euler.set(-this.pitch, this.yaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(_euler);
 
     // Speed FOV + a touch of shake.
     const targetFov = 70 + THREE.MathUtils.clamp((this.speed - 16) * 0.55, 0, 26);

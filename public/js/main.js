@@ -350,7 +350,6 @@ let orbitAngle = 0;
 let frameAvg = 16.7;
 let qualityCheck = 0;
 let downgradeGuard = 0;
-const _aim = new THREE.Vector3();
 
 function tuneQuality(dtMs, dt) {
   frameAvg += (Math.min(dtMs, 200) - frameAvg) * 0.06;
@@ -424,22 +423,6 @@ function frame(now) {
       acc = 0;
       if (p.alive) net.send(p.netState());
     }
-
-    // One reticle, sitting on what the shot will hit. Not the middle of the
-    // screen: the camera eases into place behind the hero, so while you turn,
-    // its forward direction and your aim are two different things.
-    camera.updateMatrixWorld();
-    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-    _aim.copy(p.aimPoint).applyMatrix4(camera.matrixWorldInverse);
-    const behind = _aim.z > -0.05;
-    _aim.applyMatrix4(camera.projectionMatrix);
-    const cx = behind ? 0 : (_aim.x * 0.5 + 0.5) * innerWidth;
-    const cy = behind ? 0 : (-_aim.y * 0.5 + 0.5) * innerHeight;
-    const edge = 26;
-    ui.setCrosshair(
-      THREE.MathUtils.clamp(cx, edge, innerWidth - edge),
-      THREE.MathUtils.clamp(cy, edge, innerHeight - edge)
-    );
 
     // HUD
     ui.setPaused(!input.locked);
