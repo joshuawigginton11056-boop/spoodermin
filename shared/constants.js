@@ -37,7 +37,18 @@ export const WEB = {
   // Shortest the line can ever get. A rope of a few metres is a pirouette, not
   // a swing — this is the floor that keeps arcs wide.
   MIN_LENGTH: 18,
-  REEL_SPEED: 14, // rope shortening while holding the swing button
+  REEL_SPEED: 14, // rope shortening while holding C
+  // The line hauls itself in on the way down through an arc, the way you pump
+  // a swing by standing up at the bottom, and eases off once you are rising so
+  // it never drags you up into the anchor. Nothing to hold.
+  AUTO_REEL: 11,
+  // ...but only down to this share of the line you fired, never past the
+  // absolute floor. Left to run all the way in, an automatic reel ends every
+  // swing on a short rope spinning fast — the exact thing that made swinging
+  // feel out of control — and a flat floor throws away the difference between
+  // a long arc off a tower and a short hop between shopfronts.
+  AUTO_REEL_KEEP: 0.72,
+  AUTO_REEL_MIN: 34,
   SWING_ACCEL: 34, // player steering force mid-swing
   // Gravity while hanging on a line. Walking gravity is 30 — three times
   // Earth's — which is right for a punchy jump and completely wrong for an

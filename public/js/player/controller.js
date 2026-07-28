@@ -87,6 +87,7 @@ export class LocalPlayer {
     // swing state
     this.anchor = null; // THREE.Vector3
     this.ropeLen = 0;
+    this.ropeLen0 = 0;
     this.swingSide = 1;
     this.swingTime = 0;
     this.zipTarget = null;
@@ -230,6 +231,9 @@ export class LocalPlayer {
     // Hang on exactly the length that was fired, so the line goes taut as the
     // arc reaches it instead of pre-tensioned and yanking on contact.
     this.ropeLen = THREE.MathUtils.clamp(this.pos.distanceTo(this.anchor), WEB.MIN_LENGTH, WEB.MAX_LENGTH);
+    // Remembered so the automatic reel can pull in a share of *this* line
+    // rather than towards one fixed length for every swing.
+    this.ropeLen0 = this.ropeLen;
     this.state = STATE.SWING;
     this.swingTime = 0;
     // Launching from a standstill: give a hop so the line actually lifts you
@@ -464,10 +468,17 @@ export class LocalPlayer {
     this.swingTime += dt;
     this.vel.y -= WEB.SWING_GRAVITY * dt;
 
-    // Reel in for altitude / speed — on C alone. W used to do this too, and
-    // since holding W is just "forward", every swing quietly wound itself down
-    // to the minimum rope: a shorter line at the same energy means a tighter,
-    // faster spin, which is most of why swinging ran away from the player.
+    // The line reels itself in on the way down through the arc and lets be on
+    // the way up, so a swing pumps without anyone holding a key. It stops at
+    // AUTO_REEL_MIN — run all the way in and every swing finishes as a short,
+    // fast spin, which is the thing that made this feel out of control.
+    const reelFloor = Math.max(WEB.AUTO_REEL_MIN, this.ropeLen0 * WEB.AUTO_REEL_KEEP);
+    if (this.vel.y < 0 && this.ropeLen > reelFloor) {
+      this.ropeLen = Math.max(reelFloor, this.ropeLen - WEB.AUTO_REEL * dt);
+    }
+
+    // C hauls in harder than the automatic reel, and all the way down, for
+    // anyone who wants to whip round a corner or climb a face.
     if (this.input.down('KeyC')) {
       this.ropeLen = Math.max(WEB.MIN_LENGTH, this.ropeLen - WEB.REEL_SPEED * dt);
     }

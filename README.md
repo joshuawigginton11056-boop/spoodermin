@@ -48,7 +48,7 @@ without other humans.
 | `Space` | Jump — or wall-jump off a building, or cut loose from a swing with a boost |
 | **Left click** | Fire a web ball (damages enemies) |
 | **Right click (hold)** | Shoot a web line and swing. Release to let go and keep your momentum |
-| `C` while swinging | Reel the line in — shorter rope, faster arc |
+| `C` while swinging | Haul the line in harder than it already does on its own |
 | `E` | Web-zip: yank yourself straight to whatever the crosshair is on |
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
@@ -146,8 +146,12 @@ and a pirouette, which is not a swing. Gravity on the line is lighter than
 walking gravity, because an arc bought at 30m/s² is over before it starts;
 letting go converts part of the arc into lift so you carry into the next one;
 and the line takes up slack on its own so the bottom of the arc clears the
-street. `W` no longer reels the rope in — holding forward used to wind every
-swing down to the shortest rope, which is what made it run away from you.
+street. The line also reels itself in on the way down through each arc and eases
+off on the way up — a swing pumps itself, with nothing to hold — stopping at a
+share of the line you fired so a long arc off a tower stays a long arc. `C`
+hauls in harder for whipping round a corner. `W` no longer reels at all: holding
+forward used to wind every swing down to the shortest rope, which is what made
+it run away from you.
 
 **Frame-rate independence.** The player is simulated in sub-steps of at most
 1/90 s, and every rate — gravity, the swing's energy gain, camera easing — is
