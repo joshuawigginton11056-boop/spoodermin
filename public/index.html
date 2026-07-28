@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>SPOODERMIN — Web-Slinger Battle Royale</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🕷️</text></svg>" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/build/three.module.js",
+        "three/addons/": "/vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- ------------------------------------------------------------- HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair"><span></span><span></span><span></span><span></span><i></i></div>
+
+    <div id="topbar">
+      <div class="pill" id="alive-pill"><b id="alive-count">--</b><small>ALIVE</small></div>
+      <div class="pill" id="phase-pill"><b id="phase-text">—</b><small id="phase-sub">&nbsp;</small></div>
+      <div class="pill" id="kills-pill"><b id="kill-count">0</b><small>KOs</small></div>
+    </div>
+
+    <div id="killfeed"></div>
+
+    <div id="bottomleft">
+      <div class="bar health">
+        <div class="bar-fill" id="health-fill"></div>
+        <span class="bar-label">HP <b id="health-text">100</b></span>
+      </div>
+      <div class="bar fluid">
+        <div class="bar-fill" id="fluid-fill"></div>
+        <span class="bar-label">WEB FLUID</span>
+      </div>
+      <div id="speedo"><b id="speed-text">0</b> <small>km/h</small></div>
+    </div>
+
+    <div id="bottomright">
+      <div id="minimap-wrap">
+        <canvas id="minimap" width="220" height="220"></canvas>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+    <div id="damage-vignette"></div>
+    <div id="hitmarker"></div>
+  </div>
+
+  <!-- ------------------------------------------------------------ menus -->
+  <div id="menu" class="overlay">
+    <div class="panel">
+      <h1 class="logo">SPOODER<span>MIN</span></h1>
+      <p class="tagline">Low-poly web-slinger battle royale. Swing the skyline. Web the rest.</p>
+
+      <label class="field">
+        <span>HERO NAME</span>
+        <input id="name-input" maxlength="14" placeholder="Webhead" autocomplete="off" />
+      </label>
+
+      <button id="play-btn" class="primary">ENTER THE CITY</button>
+      <div id="connect-status" class="status">not connected</div>
+
+      <div class="controls-grid">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Move</span></div>
+        <div><kbd>Shift</kbd><span>Sprint</span></div>
+        <div><kbd>Space</kbd><span>Jump / wall-jump</span></div>
+        <div><kbd>Left Click</kbd><span>Fire web ball</span></div>
+        <div><kbd>Right Click</kbd><span>Hold to swing</span></div>
+        <div><kbd>E</kbd><span>Web-zip to point</span></div>
+        <div><kbd>C</kbd><span>Reel in while swinging</span></div>
+        <div><kbd>Tab</kbd><span>Scoreboard</span></div>
+        <div><kbd>V</kbd><span>Camera distance</span></div>
+        <div><kbd>Esc</kbd><span>Release mouse</span></div>
+      </div>
+      <p class="fineprint">Every building, hero and web is generated in code — no external assets.</p>
+    </div>
+  </div>
+
+  <div id="deploy" class="overlay hidden">
+    <div class="panel slim">
+      <h2 id="deploy-title">MATCH IN PROGRESS</h2>
+      <div id="deploy-timer" class="bigtimer">--</div>
+      <p id="deploy-sub">Waiting for the next drop…</p>
+      <div id="roster" class="roster"></div>
+    </div>
+  </div>
+
+  <div id="results" class="overlay hidden">
+    <div class="panel">
+      <h2 id="results-title">#4</h2>
+      <p id="results-sub">Eliminated by Nightweaver</p>
+      <div id="results-board" class="board"></div>
+      <button id="again-btn" class="primary">BACK TO THE ROOFTOPS</button>
+    </div>
+  </div>
+
+  <div id="scoreboard" class="overlay passthrough hidden">
+    <div class="panel">
+      <h2>SCOREBOARD</h2>
+      <div id="score-board" class="board"></div>
+    </div>
+  </div>
+
+  <div id="fatal" class="overlay hidden">
+    <div class="panel">
+      <h2>SOMETHING BROKE</h2>
+      <pre id="fatal-text"></pre>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

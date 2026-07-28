@@ -1,0 +1,29 @@
+{
+  "name": "spoodermin",
+  "version": "1.0.0",
+  "description": "SPOODERMIN - a low-poly 3D superhero battle royale. Swing on webs through a cartoon city and web-blast your rivals.",
+  "type": "module",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/joshuawigginton11056-boop/spoodermin"
+  },
+  "keywords": [
+    "threejs",
+    "game",
+    "battle-royale",
+    "multiplayer",
+    "low-poly"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "three": "^0.185.1",
+    "ws": "^8.21.1"
+  }
+}
