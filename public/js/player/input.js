@@ -24,11 +24,14 @@
 const REFUSALS_BEFORE_GIVING_UP = 3;
 // Don't hammer requestPointerLock while playing in the fallback.
 const RETRY_INTERVAL = 2000;
-// Cursor steering: how far out the cursor has to be, as a fraction of the
-// half-screen, before the view starts turning, and how fast it turns at full
-// deflection (in the same units as a mouse delta, so ~2 rad/s).
-const EDGE_TURN_FROM = 0.55;
+// Edge assist for when there is no pointer lock: how close to the border the
+// pointer has to get before the view keeps turning on its own, and how fast it
+// does so hard against the edge (same units as a mouse delta, so ~2 rad/s).
+const EDGE_TURN_FROM = 0.86;
 const EDGE_TURN_RATE = 900;
+// Largest single mouse delta that will be believed, in pixels.
+const MAX_MOUSE_STEP = 160;
+const THREE_CLAMP = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
 export class Input {
   constructor(canvas) {
@@ -89,9 +92,17 @@ export class Input {
       const r = canvas.getBoundingClientRect();
       this.cursor.x = e.clientX - r.left;
       this.cursor.y = e.clientY - r.top;
-      if (!this.pointerLocked) return;
-      this.mouse.dx += e.movementX || 0;
-      this.mouse.dy += e.movementY || 0;
+      // movementX/Y are reported on every mousemove, not just under pointer
+      // lock, so moving the mouse turns the view either way. Without the lock
+      // the only thing missing is that the pointer eventually runs into the
+      // edge of the window and stops producing movement — which is what the
+      // edge assist in beginFrame() is for, not a reason to steer differently.
+      if (!this.active) return;
+      // Clamped because the pointer can leave the window and come back
+      // somewhere else entirely, and that arrives as one enormous delta that
+      // would spin the view through half a turn in a single frame.
+      this.mouse.dx += THREE_CLAMP(e.movementX || 0, -MAX_MOUSE_STEP, MAX_MOUSE_STEP);
+      this.mouse.dy += THREE_CLAMP(e.movementY || 0, -MAX_MOUSE_STEP, MAX_MOUSE_STEP);
     });
 
     document.addEventListener('pointerlockchange', () => {
@@ -215,19 +226,13 @@ export class Input {
   hit(code) { return this.pressed.has(code); }
 
   /**
-   * Is the cursor itself the aim, rather than a turn-rate control? True
-   * whenever pointer lock was refused and we are steering by cursor.
-   */
-  get absoluteAim() { return this.freeLook && this.active; }
-
-  /**
-   * Swings the view round when the cursor is pushed out to the edge of the
-   * screen. Aiming itself is absolute — the cursor *is* the crosshair — so
-   * this only has to cover turning past what is currently on screen, and it
-   * stays out of the way across the middle of the picture.
+   * Keeps the view turning when the pointer has run out of window to move in.
+   * Mouse movement does the actual looking; this only rescues the case where
+   * the pointer is jammed against an edge and cannot report any more, so it
+   * stays well out of the way until you are nearly there.
    */
   beginFrame(dt) {
-    if (!this.absoluteAim) return;
+    if (!this.freeLook || !this.active) return;
     const r = this.canvas.getBoundingClientRect();
     const nx = (this.cursor.x - r.width / 2) / (r.width / 2);
     const ny = (this.cursor.y - r.height / 2) / (r.height / 2);

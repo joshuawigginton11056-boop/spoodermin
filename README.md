@@ -59,11 +59,11 @@ anywhere takes it back — including during the lobby countdown, where the panel
 covers the whole screen.
 
 If the browser refuses pointer lock — a sandboxed iframe, for instance — the
-game switches to **cursor aim**: the system pointer is hidden and the crosshair
-takes its place, so there is still exactly one pointer on screen and it sits on
-the pixel your mouse is at. Whatever is under it is what you web, immediately;
-push it out towards an edge to swing the view round. Everything else is
-unchanged.
+mouse still looks around exactly as it does with the lock, because `movementX`
+is reported on every mousemove and not just a captured one. The system pointer
+is hidden so there is only ever one thing on screen to follow. The single thing
+the lock buys is a pointer that never runs out of window, so nudging one edge
+keeps the view turning when it does. Everything else is unchanged.
 The refusal is not assumed to be permanent: a later click tries for the real
 thing again, and the game only stops asking after three refusals in a row.
 
@@ -142,15 +142,12 @@ the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
 
-**Aiming** is one crosshair, always on the thing it will hit. Steering by cursor
-it is drawn on the cursor pixel and the ray is cast from the camera through that
-same pixel, so the two cannot drift apart; casting from the hero's eye instead
-put them a hundred pixels out at the corners, dead-on only in the middle. Under
-pointer lock, where there is no cursor, it marks where the aim ray lands — which
-is not the middle of the screen, because the camera eases into place behind the
-hero and its forward direction is not your aim while you are turning. Either
-way the crosshair is resolved before anything reads it, so a web fired this
-frame goes where you are pointing now.
+**Aiming** is one crosshair, always on the thing it will hit. It is not the
+middle of the screen: the camera eases into place behind the hero, so while you
+turn, the camera's forward direction and your aim are two different things and
+a reticle nailed to the centre quietly lies about where the web will go. It is
+resolved before anything reads it, so a web fired this frame goes where you are
+pointing now rather than where you were pointing last frame.
 
 **Swinging** is tuned to glide rather than sprint. The web goes wherever the
 crosshair is pointing — any surface in reach, high or low. Only when you are

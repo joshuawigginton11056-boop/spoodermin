@@ -195,7 +195,7 @@ input.onLockChange = (locked) => {
 // Pointer lock can be refused (sandboxed iframe); say so once and explain the
 // cursor-steering fallback rather than leaving the player unable to turn.
 input.onFreeLook = () => {
-  ui.toast('CURSOR AIM', 'You aim where the cursor is — push it to an edge to turn', 5);
+  ui.toast('MOUSE LOOK', 'This browser will not hold the mouse — nudge an edge to keep turning', 5);
 };
 
 // ------------------------------------------------------------ net handlers
@@ -425,30 +425,21 @@ function frame(now) {
       if (p.alive) net.send(p.netState());
     }
 
-    // One reticle, sitting on what the shot will hit.
-    if (input.absoluteAim) {
-      // Steering by cursor: the cursor is the crosshair. Drawing it straight
-      // on the cursor pixel is exact and has no frame of lag in it, and the
-      // system pointer is hidden, so there is only ever one of them.
-      ui.setCrosshair(input.cursor.x, input.cursor.y);
-    } else {
-      // Under pointer lock there is no cursor, so the reticle marks where the
-      // aim ray lands. That is not the middle of the screen: the camera eases
-      // into place behind the hero, so while you turn, its forward direction
-      // and your aim are two different things.
-      camera.updateMatrixWorld();
-      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-      _aim.copy(p.aimPoint).applyMatrix4(camera.matrixWorldInverse);
-      const behind = _aim.z > -0.05;
-      _aim.applyMatrix4(camera.projectionMatrix);
-      const cx = behind ? 0 : (_aim.x * 0.5 + 0.5) * innerWidth;
-      const cy = behind ? 0 : (-_aim.y * 0.5 + 0.5) * innerHeight;
-      const edge = 26;
-      ui.setCrosshair(
-        THREE.MathUtils.clamp(cx, edge, innerWidth - edge),
-        THREE.MathUtils.clamp(cy, edge, innerHeight - edge)
-      );
-    }
+    // One reticle, sitting on what the shot will hit. Not the middle of the
+    // screen: the camera eases into place behind the hero, so while you turn,
+    // its forward direction and your aim are two different things.
+    camera.updateMatrixWorld();
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    _aim.copy(p.aimPoint).applyMatrix4(camera.matrixWorldInverse);
+    const behind = _aim.z > -0.05;
+    _aim.applyMatrix4(camera.projectionMatrix);
+    const cx = behind ? 0 : (_aim.x * 0.5 + 0.5) * innerWidth;
+    const cy = behind ? 0 : (-_aim.y * 0.5 + 0.5) * innerHeight;
+    const edge = 26;
+    ui.setCrosshair(
+      THREE.MathUtils.clamp(cx, edge, innerWidth - edge),
+      THREE.MathUtils.clamp(cy, edge, innerHeight - edge)
+    );
 
     // HUD
     ui.setPaused(!input.locked);
