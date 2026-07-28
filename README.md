@@ -53,11 +53,17 @@ without other humans.
 | `E` | Web-zip: yank yourself straight to whatever the crosshair is on |
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
-| `Esc` | Release the mouse (click the canvas to grab it again) |
+| `Esc` | Release the mouse (click anywhere to grab it again) |
+
+Whenever the mouse is loose the game says **PAUSED** on screen, and a click
+anywhere takes it back — including during the lobby countdown, where the panel
+covers the whole screen.
 
 If the browser refuses pointer lock — a sandboxed iframe, for instance — the
 game says so and switches to cursor steering: the further the cursor sits from
 the middle of the screen, the faster you turn. Everything else is unchanged.
+The refusal is not assumed to be permanent: a later click tries for the real
+thing again, and the game only stops asking after three refusals in a row.
 
 **Wall-crawling:** hold a movement key into a wall while airborne and you stick
 to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.
@@ -132,6 +138,19 @@ projectiles and their hits, storm damage, eliminations, placements — is owned 
 the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
+
+**Frame-rate independence.** The player is simulated in sub-steps of at most
+1/90 s, and every rate — gravity, the swing's energy gain, camera easing — is
+expressed per second. A swing therefore traces the same arc at 30fps as it does
+at 144fps, and a fast release cannot pass through a wall between two frames.
+
+**Adaptive quality.** `main.js` watches its own frame time and moves between
+four tiers, trading render scale, shadow-map size and shadow range for a steady
+frame rate; it steps down quickly and back up slowly so the setting does not
+flap. The shadow frustum follows the player snapped to whole shadow texels,
+which stops shadow edges crawling as you move. Current tier and average frame
+time are readable from the console as `__spoodermin.quality` and
+`__spoodermin.frameAvg`, and `__spoodermin.setQuality(0..3)` pins one.
 
 **Bots** are simulated entirely on the server and behave like extra players:
 they path toward the safe zone, orbit their target, take line-of-sight shots

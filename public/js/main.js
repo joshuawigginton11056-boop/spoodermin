@@ -18,13 +18,42 @@ const ui = new UI();
 
 // ---------------------------------------------------------------- renderer
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.02;
+
+// ------------------------------------------------------- adaptive quality
+// A skyline this size is fill-rate bound long before it is CPU bound, and a
+// high-DPI screen quietly asks for four times the pixels. Rather than pick one
+// setting and hope, the game watches its own frame time and moves between
+// these tiers — the point is a steady frame rate, which reads as "smooth" far
+// more than any single effect does.
+const MAX_DPR = Math.min(devicePixelRatio || 1, 2);
+const QUALITY = [
+  { name: 'low', dpr: 0.7, shadow: 0, heroShadowDist: 0 },
+  { name: 'medium', dpr: 1.0, shadow: 1, heroShadowDist: 45 },
+  { name: 'high', dpr: 1.25, shadow: 2, heroShadowDist: 90 },
+  { name: 'ultra', dpr: 1.5, shadow: 3, heroShadowDist: 160 },
+];
+let quality = 2;
+let appliedDpr = 0;
+
+function applyQuality(level, skyRig) {
+  quality = THREE.MathUtils.clamp(level, 0, QUALITY.length - 1);
+  const q = QUALITY[quality];
+  const dpr = Math.min(MAX_DPR, q.dpr);
+  // setPixelRatio reallocates the drawing buffer, so only when it moves.
+  if (dpr !== appliedDpr) {
+    appliedDpr = dpr;
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(innerWidth, innerHeight);
+  }
+  renderer.shadowMap.enabled = q.shadow > 0;
+  skyRig?.setShadowQuality(q.shadow);
+}
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.25, CITY.SIZE * 4);
@@ -36,6 +65,8 @@ const effects = new Effects(scene);
 const remotes = new RemoteManager(scene);
 const input = new Input(canvas);
 const net = createTransport();
+
+applyQuality(quality, sky);
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -145,9 +176,18 @@ ui.el.againBtn.addEventListener('click', () => {
   input.lock();
 });
 
-// Clicking the canvas after Esc re-grabs the mouse.
-canvas.addEventListener('click', () => {
-  if (game.started && !input.locked && ui.el.results.classList.contains('hidden')) input.lock();
+// Clicking anywhere after Esc re-grabs the mouse. This deliberately listens on
+// the window rather than the canvas: the lobby panel is a full-screen overlay,
+// so a canvas-only handler meant that losing the mouse during the countdown
+// left you with no way at all to get the controls back.
+addEventListener('mousedown', (e) => {
+  if (!game.started) return;
+  if (e.target.closest?.('button, input, a')) return;
+  if (!ui.el.results.classList.contains('hidden')) return;
+  if (!input.locked) input.lock();
+  // Playing on the cursor-steering fallback: a click is a cheap moment to see
+  // whether whatever refused pointer lock has since let go of it.
+  else if (input.freeLook && !input.lockRefused) input.lock();
 });
 input.onLockChange = (locked) => {
   if (!locked && game.started) ui.status('paused — click to resume');
@@ -304,6 +344,27 @@ let last = performance.now();
 let acc = 0;
 let orbitAngle = 0;
 
+// Frame-time watchdog driving the quality tiers. The average is deliberately
+// slow to react and the cool-downs are long: a quality setting that flaps back
+// and forth is more distracting than either setting on its own.
+let frameAvg = 16.7;
+let qualityCheck = 0;
+let downgradeGuard = 0;
+
+function tuneQuality(dtMs, dt) {
+  frameAvg += (Math.min(dtMs, 200) - frameAvg) * 0.06;
+  qualityCheck -= dt;
+  downgradeGuard -= dt;
+  if (qualityCheck > 0) return;
+  qualityCheck = 1.5;
+  if (frameAvg > 23 && quality > 0) {
+    applyQuality(quality - 1, sky);
+    downgradeGuard = 8;
+  } else if (frameAvg < 11 && quality < QUALITY.length - 1 && downgradeGuard <= 0) {
+    applyQuality(quality + 1, sky);
+  }
+}
+
 // Cinematic sweep over the skyline, used on the menu and between matches.
 function cinematicCamera(dt) {
   orbitAngle += dt * 0.05;
@@ -320,9 +381,16 @@ function cinematicCamera(dt) {
 
 function frame(now) {
   requestAnimationFrame(frame);
-  let dt = (now - last) / 1000;
+  const dtMs = now - last;
   last = now;
-  if (dt > 0.1) dt = 0.1;
+  let dt = dtMs / 1000;
+  // A long frame is still simulated in full — the physics is sub-stepped, so
+  // there is nothing to protect against here except a tab that was in the
+  // background. Clamping this to a tenth of a second used to put the whole
+  // game into slow motion the moment the frame rate dipped, which feels far
+  // more like broken controls than a dropped frame does.
+  if (dt > 0.2) dt = 0.2;
+  tuneQuality(dtMs, dt);
 
   input.beginFrame(dt);
   const spectatingNobody = game.started && game.player && !game.player.alive && !game.spectateId;
@@ -357,6 +425,7 @@ function frame(now) {
     }
 
     // HUD
+    ui.setPaused(!input.locked);
     ui.setHealth(p.health);
     ui.setFluid(p.fluid);
     ui.setSpeed(p.speed);
@@ -394,7 +463,7 @@ function frame(now) {
     if (showScore) ui.renderBoard(ui.el.scoreBoard, game.scoreRows, true);
   }
 
-  remotes.update(dt, performance.now() / 1000, camera, effects);
+  remotes.update(dt, performance.now() / 1000, camera, effects, QUALITY[quality].heroShadowDist);
   effects.update(dt);
   stormWall.update(dt);
   sky.update(dt, game.player && game.player.alive ? game.player.pos : camera.position);
@@ -415,7 +484,10 @@ Object.defineProperty(globalThis, '__spoodermin', {
     get colliders() { return game.city?.colliders.length ?? 0; },
     get drawCalls() { return renderer.info.render.calls; },
     get triangles() { return renderer.info.render.triangles; },
-    refs: { scene, camera, renderer, game, remotes, effects, net },
+    get quality() { return QUALITY[quality].name; },
+    get frameAvg() { return frameAvg; },
+    setQuality: (n) => applyQuality(n, sky),
+    refs: { scene, camera, renderer, game, remotes, effects, net, sky, input },
     game,
   }),
 });

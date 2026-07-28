@@ -1,36 +1,71 @@
 // Keyboard + mouse input.
 //
-// Pointer lock is the good path. Some embedding contexts (a sandboxed iframe
-// without the pointer-lock permission, for instance) refuse it, so there is a
-// steer-with-the-cursor fallback that keeps the game fully playable: the
-// further the cursor sits from the middle of the canvas, the faster you turn.
+// Two rules drive the design here:
+//
+//  1. The keyboard must never go dead. Movement keys are read from the raw
+//     key state, independently of whether the mouse is captured, and a tap
+//     that starts and ends between two frames is still delivered — at a low
+//     frame rate that is the difference between "responsive" and "the
+//     controls are gone".
+//
+//  2. Pointer lock is the good path but it is refused for all sorts of
+//     reasons, some permanent (a sandboxed iframe) and some transient (the
+//     browser's cool-down right after you press Escape). A transient refusal
+//     must not permanently downgrade the game to cursor steering, so the
+//     fallback is entered optimistically and left again the moment a real
+//     lock succeeds.
+
+// Refusals in a row before we stop asking. Browsers do not reliably
+// distinguish "this frame may never have the lock" from "you pressed Escape a
+// moment ago", and guessing from the error name gets the second case wrong —
+// which would strand a player in cursor steering for the rest of the match.
+// Counting instead is dull and always right: a sandbox refuses every time, a
+// cool-down does not.
+const REFUSALS_BEFORE_GIVING_UP = 3;
+// Don't hammer requestPointerLock while playing in the fallback.
+const RETRY_INTERVAL = 2000;
 
 export class Input {
   constructor(canvas) {
     this.canvas = canvas;
     this.keys = new Set();
     this.pressed = new Set(); // edge-triggered, cleared each frame
+    this.released = new Set(); // keys let go of this frame, held one frame more
     this.mouse = { dx: 0, dy: 0, left: false, right: false, leftEdge: false, rightEdge: false, wheel: 0 };
     this.cursor = { x: 0, y: 0 };
     this.pointerLocked = false;
     this.freeLook = false;
+    this.lockRefused = false; // pointer lock will never be granted here
+    this._refusals = 0;
     this.active = false; // controls engaged, by either method
-    this.enabled = true;
     this.onLockChange = null;
     this.onFreeLook = null;
     this._lockProbe = null;
+    this._lastAttempt = -Infinity;
+    this._announcedFreeLook = false;
+
+    // The canvas has to be focusable, or a click on it leaves the keyboard
+    // pointed at whatever was focused before (or at the parent document, when
+    // the game is embedded in an iframe).
+    if (!canvas.hasAttribute('tabindex')) canvas.setAttribute('tabindex', '0');
 
     addEventListener('keydown', (e) => {
-      if (e.repeat) return;
       const k = e.code;
+      // A held key re-fires keydown; only the first one is an edge, but the
+      // key state has to be re-asserted either way in case a stray keyup or a
+      // lost focus event cleared it.
       this.keys.add(k);
+      this.released.delete(k);
+      if (e.repeat) return;
       this.pressed.add(k);
       if (this.active && (k === 'Space' || k === 'Tab')) e.preventDefault();
       // With no pointer lock to exit, Escape has to release the controls itself.
       if (k === 'Escape' && this.freeLook && this.active) this.unlock();
     });
-    addEventListener('keyup', (e) => this.keys.delete(e.code));
-    addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; });
+    // Deferred so a press and release that both land between two frames still
+    // reads as one frame of movement instead of vanishing.
+    addEventListener('keyup', (e) => this.released.add(e.code));
+    addEventListener('blur', () => this.clearHeld());
 
     canvas.addEventListener('mousedown', (e) => {
       if (!this.active) return;
@@ -58,12 +93,14 @@ export class Input {
       this.pointerLocked = document.pointerLockElement === canvas;
       clearTimeout(this._lockProbe);
       if (this.pointerLocked) {
+        // A real lock always wins: leave the cursor-steering fallback behind.
+        this._refusals = 0;
         this.freeLook = false;
+        this.canvas.style.cursor = '';
         this.active = true;
       } else if (!this.freeLook) {
         this.active = false;
-        this.keys.clear();
-        this.mouse.left = this.mouse.right = false;
+        this.clearHeld();
       }
       if (this.onLockChange) this.onLockChange(this.active);
     });
@@ -73,12 +110,33 @@ export class Input {
   get locked() { return this.active; }
   set locked(v) { this.active = !!v; }
 
-  lock() {
-    if (this.freeLook) { this.active = true; return; }
-    const el = this.canvas;
-    if (!el.requestPointerLock) { this.useFreeLook(); return; }
+  /** Drop every held key and button — used when focus or the lock goes away. */
+  clearHeld() {
+    this.keys.clear();
+    this.released.clear();
+    this.mouse.left = this.mouse.right = false;
+  }
 
-    const giveUp = () => this.useFreeLook();
+  /**
+   * Take control of the mouse. Called on the click that starts or resumes the
+   * game, and — while playing in the cursor-steering fallback — retried
+   * quietly on later clicks in case whatever refused the lock has passed.
+   */
+  lock() {
+    const el = this.canvas;
+    el.focus?.({ preventScroll: true });
+
+    if (this.lockRefused || !el.requestPointerLock) {
+      this.useFreeLook();
+      return;
+    }
+    const now = performance.now();
+    if (this.freeLook && now - this._lastAttempt < RETRY_INTERVAL) {
+      this.active = true;
+      return;
+    }
+    this._lastAttempt = now;
+
     // Every request below must have a rejection handler. A stray rejected
     // pointer-lock promise surfaces as an unhandled rejection, which is not a
     // crash but looks exactly like one.
@@ -87,50 +145,59 @@ export class Input {
       try {
         p = opts ? el.requestPointerLock(opts) : el.requestPointerLock();
       } catch {
-        giveUp();
-        return null;
+        return undefined;
       }
       return p && typeof p.catch === 'function' ? p : null;
     };
 
+    const failed = () => {
+      if (++this._refusals >= REFUSALS_BEFORE_GIVING_UP) this.lockRefused = true;
+      this.useFreeLook();
+    };
+
     const first = request({ unadjustedMovement: true });
+    if (first === undefined) { failed(); return; }
     if (first) {
       first.catch((err) => {
         // Only the raw-movement option is worth a second try; anything else
-        // (a sandboxed frame with no pointer-lock permission, a user-gesture
-        // problem) will fail again for the same reason.
+        // will fail again for the same reason.
         if (err && err.name === 'NotSupportedError') {
           const retry = request(null);
-          if (retry) retry.catch(giveUp);
+          if (retry === undefined) { failed(); return; }
+          if (retry) retry.catch(failed);
           return;
         }
-        giveUp();
+        failed();
       });
     }
 
     // Belt and braces: some browsers resolve the promise but never actually
-    // hand over the lock.
+    // hand over the lock. Falling back here is not treated as a refusal — the
+    // next click still asks for the real thing.
     clearTimeout(this._lockProbe);
     this._lockProbe = setTimeout(() => {
       if (!this.pointerLocked) this.useFreeLook();
-    }, 700);
+    }, 900);
   }
 
   useFreeLook() {
-    if (this.freeLook) { this.active = true; return; }
-    this.freeLook = true;
     this.active = true;
+    if (this.freeLook) return;
+    this.freeLook = true;
     this.canvas.style.cursor = 'crosshair';
-    if (this.onFreeLook) this.onFreeLook();
+    if (!this._announcedFreeLook) {
+      this._announcedFreeLook = true;
+      if (this.onFreeLook) this.onFreeLook();
+    }
     if (this.onLockChange) this.onLockChange(true);
   }
 
   unlock() {
+    clearTimeout(this._lockProbe);
     document.exitPointerLock?.();
     if (this.freeLook) {
       this.active = false;
-      this.keys.clear();
-      this.mouse.left = this.mouse.right = false;
+      this.clearHeld();
       if (this.onLockChange) this.onLockChange(false);
     }
   }
@@ -155,6 +222,10 @@ export class Input {
 
   endFrame() {
     this.pressed.clear();
+    // Keys released during this frame stay "down" for exactly the frame that
+    // observed them, then go.
+    for (const k of this.released) this.keys.delete(k);
+    this.released.clear();
     this.mouse.dx = 0;
     this.mouse.dy = 0;
     this.mouse.leftEdge = false;

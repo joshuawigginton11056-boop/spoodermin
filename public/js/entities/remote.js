@@ -8,6 +8,7 @@ import { nameTagTexture } from '../util/textures.js';
 
 const INTERP_DELAY = 0.1;
 const _v = new THREE.Vector3();
+const _hand = new THREE.Vector3();
 
 class RemotePlayer {
   constructor(scene, info) {
@@ -52,6 +53,7 @@ class RemotePlayer {
     this.anchor = null;
     this.speed = 0;
     this.lastShotSide = 1;
+    this.animAcc = 0;
   }
 
   push(info, time) {
@@ -71,7 +73,7 @@ class RemotePlayer {
     this.kills = info.k;
   }
 
-  update(dt, now, camera) {
+  update(dt, now, camera, shadowDist = 90) {
     const target = now - INTERP_DELAY;
     let a = null;
     let b = null;
@@ -110,20 +112,28 @@ class RemotePlayer {
     this.hero.root.position.copy(this.pos);
     this.hero.root.rotation.y = this.yaw;
 
-    let anchorLocal = null;
-    if (this.anchor) anchorLocal = this.hero.root.worldToLocal(_v.copy(this.anchor)).clone();
+    const dist = camera.position.distanceTo(this.pos);
+    this.hero.setShadowCasting(dist < shadowDist);
 
-    this.hero.update(dt, {
-      state: this.state,
-      speed: this.speed,
-      vy,
-      pitch: this.pitch || 0,
-      anchorLocal,
-      swingSide: 1,
-    });
+    // Far-off heroes run the same rig, just less often — at a block's distance
+    // nobody can tell a limb is being interpolated at 10Hz, and the animation
+    // is the most expensive thing about a player who is barely a silhouette.
+    this.animAcc += dt;
+    if (dist < 90 || this.animAcc >= 0.1) {
+      let anchorLocal = null;
+      if (this.anchor) anchorLocal = this.hero.root.worldToLocal(_v.copy(this.anchor)).clone();
+      this.hero.update(this.animAcc, {
+        state: this.state,
+        speed: this.speed,
+        vy,
+        pitch: this.pitch || 0,
+        anchorLocal,
+        swingSide: 1,
+      });
+      this.animAcc = 0;
+    }
 
     // Tags shrink with distance but never vanish entirely.
-    const dist = camera.position.distanceTo(this.pos);
     const scale = THREE.MathUtils.clamp(dist / 26, 0.75, 3.4);
     const top = this.pos.y + 4.4;
     this.tag.position.set(this.pos.x, top + 0.55 * scale, this.pos.z);
@@ -201,12 +211,12 @@ export class RemoteManager {
 
   get(id) { return this.players.get(id); }
 
-  update(dt, now, camera, effects) {
+  update(dt, now, camera, effects, shadowDist) {
     for (const rp of this.players.values()) {
-      rp.update(dt, now, camera);
+      rp.update(dt, now, camera, shadowDist);
       // Draw their web line while they swing.
       if (rp.alive && rp.anchor && rp.state === 3) {
-        effects.remoteLine(rp.id, rp.hero.handWorld(1, _v.clone()), rp.anchor);
+        effects.remoteLine(rp.id, rp.hero.handWorld(1, _hand), rp.anchor);
       } else {
         effects.remoteLine(rp.id, null, null);
       }

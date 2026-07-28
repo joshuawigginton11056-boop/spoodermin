@@ -1,5 +1,10 @@
 // Local player: movement, web-swinging, wall-crawling, zipping, aiming and the
 // third-person camera. This is where the game feel lives.
+//
+// The simulation is stepped at a bounded rate rather than once per rendered
+// frame: every rate in here is per-second, and no single step is allowed to be
+// long enough for the pendulum to overshoot or for a fast release to pass
+// through a wall. A swing therefore traces the same arc at 30fps and at 144fps.
 
 import * as THREE from 'three';
 import { PLAYER, GRAVITY, WEB, COMBAT, CITY } from '/shared/constants.js';
@@ -8,10 +13,35 @@ import { Hero } from '../entities/hero.js';
 export const STATE = { IDLE: 0, RUN: 1, AIR: 2, SWING: 3, CLING: 4, ZIP: 5 };
 
 const CAM_DISTANCES = [9.5, 14, 6];
+// Longest physics step. Anything above this and the rope constraint starts to
+// visibly overshoot, which is what made fast swings feel like they stuttered.
+const MAX_SUBSTEP = 1 / 90;
+const MAX_SUBSTEPS = 8;
+// Tangential speed-up per second of swinging, replacing a per-frame multiplier
+// that used to hand out more speed the higher your frame rate was.
+const SWING_PUMP = 1.22;
+const SWING_MAX_SPEED = 95;
+// How much of the outward velocity a taut line takes away in one step. A hair
+// under one gives the rope a little give, so catching a line halfway through a
+// fall lands as a firm tug over two or three frames instead of a single jolt.
+const ROPE_BITE = 0.86;
+// Ceiling on the positional part of the constraint, so a step that starts
+// deeply overstretched cannot fire the player off the end of the line.
+const ROPE_MAX_PULL = 55;
+// The camera pull-in probes, as (sideways, vertical) offsets from the head.
+const CAM_PROBES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55]];
+// Aim-assist cone for finding a swing anchor: (extra pitch, yaw offset) pairs.
+const ANCHOR_CONE = [];
+for (const up of [0.35, 0.6, 0.9, 1.3]) {
+  for (const side of [0, 0.25, -0.25, 0.5, -0.5]) ANCHOR_CONE.push([up, side]);
+}
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
+const _v5 = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
 
 export class LocalPlayer {
   constructor({ scene, camera, world, input, skin, onShoot, onZip, fx }) {
@@ -58,6 +88,7 @@ export class LocalPlayer {
     this.shake = 0;
 
     this.aimPoint = new THREE.Vector3();
+    this.aimDist = Infinity;
     this.canWeb = false;
   }
 
@@ -73,7 +104,9 @@ export class LocalPlayer {
     this.health = COMBAT.MAX_HEALTH;
     this.fluid = COMBAT.FLUID_MAX;
     this.hero.root.visible = true;
-    this.camPos.copy(this.pos).add(new THREE.Vector3(0, 6, 12));
+    this.camPos.copy(this.pos);
+    this.camPos.y += 6;
+    this.camPos.z += 12;
   }
 
   die() {
@@ -106,32 +139,38 @@ export class LocalPlayer {
   }
 
   updateAim() {
-    const dir = this.lookDir(_v3).clone();
-    const from = this.eye(_v2).clone();
+    const dir = this.lookDir(_v3);
+    const from = this.eye(_v2);
     const hit = this.world.raycast(from, dir, 400);
-    if (hit) this.aimPoint.copy(hit.point);
-    else this.aimPoint.copy(from).addScaledVector(dir, 400);
+    if (hit) {
+      this.aimPoint.copy(hit.point);
+      this.aimDist = hit.dist;
+    } else {
+      this.aimPoint.copy(from).addScaledVector(dir, 400);
+      this.aimDist = Infinity;
+    }
+    // The crosshair's "you can swing from that" state falls out of the aim ray
+    // we already cast, instead of costing a second one every frame.
+    this.canWeb = this.state === STATE.SWING ||
+      (this.aimDist <= WEB.MAX_LENGTH * 1.3 && this.aimPoint.y > this.pos.y + 1.5);
   }
 
   // ------------------------------------------------------------- webbing
   findAnchor() {
-    const from = this.eye(_v2).clone();
-    const dir = this.lookDir(_v3).clone();
-    let hit = this.world.raycast(from, dir, WEB.MAX_LENGTH * 1.3);
-    if (hit && hit.point.y > this.pos.y + 1.5 && hit.normal.y < 0.85) return hit.point.clone();
+    const from = this.eye(_v2);
+    const dir = this.lookDir(_v3);
+    const hit = this.world.raycast(from, dir, WEB.MAX_LENGTH * 1.3);
+    if (hit && hit.point.y > this.pos.y + 1.5 && hit.normal.y < 0.85) return _v5.copy(hit.point);
 
     // Aim assist: sweep a cone up and around the look direction so a casual
     // flick still finds a corner to swing from.
-    const base = dir.clone();
-    for (const up of [0.35, 0.6, 0.9, 1.3]) {
-      for (const side of [0, 0.25, -0.25, 0.5, -0.5]) {
-        const d = base.clone();
-        d.y += up;
-        d.applyAxisAngle(new THREE.Vector3(0, 1, 0), side);
-        d.normalize();
-        hit = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.25);
-        if (hit && hit.point.y > this.pos.y + 6 && hit.normal.y < 0.9) return hit.point.clone();
-      }
+    for (const [up, side] of ANCHOR_CONE) {
+      const d = _v4.copy(dir);
+      d.y += up;
+      d.applyAxisAngle(UP, side);
+      d.normalize();
+      const h = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.25);
+      if (h && h.point.y > this.pos.y + 6 && h.normal.y < 0.9) return _v5.copy(h.point);
     }
     return null;
   }
@@ -139,11 +178,11 @@ export class LocalPlayer {
   startSwing() {
     const a = this.findAnchor();
     if (!a) {
-      this.fx?.miss();
+      this.fx?.miss(this.aimPoint);
       return false;
     }
-    this.anchor = a;
-    this.ropeLen = Math.max(WEB.MIN_LENGTH, this.pos.distanceTo(a) * 0.98);
+    this.anchor = a.clone();
+    this.ropeLen = Math.max(WEB.MIN_LENGTH, this.pos.distanceTo(this.anchor) * 0.98);
     this.state = STATE.SWING;
     this.swingTime = 0;
     // Launching from a standstill: give a hop so the line actually lifts you
@@ -154,11 +193,11 @@ export class LocalPlayer {
     }
     this.grounded = false;
     // Shoot the line from whichever hand is closer to the anchor.
-    const rel = _v.copy(a).sub(this.pos);
+    const rel = _v.copy(this.anchor).sub(this.pos);
     const right = _v2.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     this.swingSide = rel.dot(right) >= 0 ? 1 : -1;
     this.hero.triggerShoot(this.swingSide);
-    this.fx?.webLine(this.hero.handWorld(this.swingSide, new THREE.Vector3()), a);
+    this.fx?.webLine(this.hero.handWorld(this.swingSide, _v3), this.anchor);
     return true;
   }
 
@@ -175,9 +214,9 @@ export class LocalPlayer {
 
   tryZip() {
     if (this.fluid < COMBAT.FLUID_PER_ZIP) return;
-    const dir = this.lookDir(_v3).clone();
-    const hit = this.world.raycast(this.eye(_v2).clone(), dir, WEB.MAX_LENGTH * 1.6);
-    if (!hit) { this.fx?.miss(); return; }
+    const dir = this.lookDir(_v3);
+    const hit = this.world.raycast(this.eye(_v2), dir, WEB.MAX_LENGTH * 1.6);
+    if (!hit) { this.fx?.miss(this.aimPoint); return; }
     this.fluid -= COMBAT.FLUID_PER_ZIP;
     this.zipTarget = hit.point.clone().addScaledVector(hit.normal, 1.2);
     this.zipTime = 2.2;
@@ -185,7 +224,7 @@ export class LocalPlayer {
     this.anchor = null;
     this.swingSide = 1;
     this.hero.triggerShoot(1);
-    this.fx?.webLine(this.hero.handWorld(1, new THREE.Vector3()), this.zipTarget);
+    this.fx?.webLine(this.hero.handWorld(1, _v4), this.zipTarget);
     this.onZip?.();
   }
 
@@ -204,6 +243,10 @@ export class LocalPlayer {
   }
 
   // ------------------------------------------------------------- the loop
+  /**
+   * One rendered frame: read input once, then advance the simulation in
+   * however many bounded steps `dt` is worth.
+   */
   update(dt) {
     const input = this.input;
     const m = input.mouse;
@@ -241,16 +284,28 @@ export class LocalPlayer {
     const sprint = input.down('ShiftLeft') || input.down('ShiftRight');
     const maxSpeed = (sprint ? PLAYER.SPRINT : PLAYER.WALK) * (slowed ? COMBAT.IMPACT_SLOW : 1);
 
-    // ---- actions
+    // ---- actions (edge-triggered, so exactly once per frame)
     if (m.leftEdge || (m.left && this.cooldown <= 0)) this.shoot();
     if (input.hit('KeyE')) this.tryZip();
     if (input.hit('Space')) this.jumpBuffer = 0.16;
-    this.jumpBuffer -= dt;
 
     if (m.rightEdge && this.state !== STATE.SWING) this.startSwing();
     if (!m.right && this.state === STATE.SWING) this.endSwing(true);
 
-    // ---- per-state simulation
+    // ---- simulate
+    const steps = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(dt / MAX_SUBSTEP)));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) this.simulate(h, wx, wz, wishing, maxSpeed);
+
+    this.updateHero(dt);
+    this.updateCamera(dt, false);
+    this.updateAim();
+  }
+
+  /** One bounded physics step. */
+  simulate(dt, wx, wz, wishing, maxSpeed) {
+    this.jumpBuffer -= dt;
+
     switch (this.state) {
       case STATE.ZIP: this.stepZip(dt); break;
       case STATE.SWING: this.stepSwing(dt, wx, wz); break;
@@ -325,16 +380,6 @@ export class LocalPlayer {
     const lim = CITY.HALF + 90;
     this.pos.x = THREE.MathUtils.clamp(this.pos.x, -lim, lim);
     this.pos.z = THREE.MathUtils.clamp(this.pos.z, -lim, lim);
-
-    this.updateHero(dt);
-    this.updateCamera(dt, false);
-    this.updateAim();
-
-    // Crosshair feedback: is there something swingable out there?
-    if (this.state !== STATE.SWING) {
-      const hit = this.world.raycast(this.eye(_v2).clone(), this.lookDir(_v3).clone(), WEB.MAX_LENGTH * 1.3);
-      this.canWeb = !!(hit && hit.point.y > this.pos.y + 1.5);
-    } else this.canWeb = true;
   }
 
   // ------------------------------------------------------------ movement
@@ -368,17 +413,6 @@ export class LocalPlayer {
     this.swingTime += dt;
     this.vel.y -= GRAVITY * dt;
 
-    // Steering: push along the tangent of the arc.
-    const toAnchor = _v.copy(this.anchor).sub(this.pos);
-    const dist = toAnchor.length();
-    toAnchor.divideScalar(dist || 1);
-    if (wx || wz) {
-      const wish = _v2.set(wx, 0, wz);
-      // Remove the component pointing along the rope so we do not fight it.
-      wish.addScaledVector(toAnchor, -wish.dot(toAnchor));
-      this.vel.addScaledVector(wish, WEB.SWING_ACCEL * dt);
-    }
-
     // Reel in for altitude / speed.
     if (this.input.down('KeyC') || this.input.down('KeyW')) {
       this.ropeLen = Math.max(WEB.MIN_LENGTH, this.ropeLen - WEB.REEL_SPEED * dt);
@@ -387,18 +421,43 @@ export class LocalPlayer {
       this.ropeLen = Math.min(WEB.MAX_LENGTH, this.ropeLen + WEB.REEL_SPEED * dt);
     }
 
-    // Rope constraint, applied after gravity: pull back to the sphere surface
-    // and kill only the outward radial velocity (classic pendulum).
-    const next = _v3.copy(this.pos).addScaledVector(this.vel, dt);
-    const d = next.distanceTo(this.anchor);
-    if (d > this.ropeLen) {
-      const dir = next.sub(this.anchor).divideScalar(d || 1);
-      const target = _v2.copy(this.anchor).addScaledVector(dir, this.ropeLen);
-      // Correct position implicitly by adjusting velocity toward the target.
-      this.vel.copy(target.sub(this.pos).divideScalar(dt));
-      // Small tangential energy gain makes long swings feel powerful.
-      this.vel.multiplyScalar(1.004);
+    // Steering: push along the tangent of the arc.
+    const rope = _v.copy(this.pos).sub(this.anchor);
+    const dist = rope.length() || 1;
+    rope.divideScalar(dist);
+    if (wx || wz) {
+      const wish = _v2.set(wx, 0, wz);
+      // Remove the component pointing along the rope so we do not fight it.
+      wish.addScaledVector(rope, -wish.dot(rope));
+      this.vel.addScaledVector(wish, WEB.SWING_ACCEL * dt);
     }
+
+    // Rope constraint. The line is inextensible, so all that happens at full
+    // stretch is that the outward part of the velocity stops existing — the
+    // tangential part, steering included, is carried straight through. The old
+    // version rebuilt the whole velocity vector from a position delta, which
+    // both threw the steering away and turned every frame-time wobble into a
+    // visible kick.
+    const next = _v3.copy(this.pos).addScaledVector(this.vel, dt).sub(this.anchor);
+    const d = next.length();
+    if (d > this.ropeLen) {
+      const n = next.divideScalar(d);
+      const radial = this.vel.dot(n);
+      if (radial > 0) this.vel.addScaledVector(n, -radial * ROPE_BITE);
+      // Pull the overshoot out over this step rather than snapping. The
+      // overshoot scales with dt², so dividing by dt leaves a correction that
+      // behaves the same at any frame rate.
+      const pull = Math.min(((d - this.ropeLen) / dt) * 0.65, ROPE_MAX_PULL);
+      this.vel.addScaledVector(n, -pull);
+
+      // A swing that is already moving picks up a little energy, which is what
+      // makes long arcs feel powerful. Per second, not per frame.
+      const sp = this.vel.length();
+      if (sp > 1 && sp < SWING_MAX_SPEED) this.vel.multiplyScalar(Math.pow(SWING_PUMP, dt));
+    }
+
+    const sp = this.vel.length();
+    if (sp > SWING_MAX_SPEED) this.vel.multiplyScalar(SWING_MAX_SPEED / sp);
 
     // Bail out if the rope goes slack behind us near the ground.
     if (this.anchor.y < this.pos.y + 1 && this.grounded) this.endSwing(false);
@@ -460,9 +519,9 @@ export class LocalPlayer {
 
     let anchorLocal = null;
     if (this.anchor) {
-      anchorLocal = h.root.worldToLocal(_v.copy(this.anchor)).clone();
+      anchorLocal = h.root.worldToLocal(_v.copy(this.anchor));
     } else if (this.zipTarget) {
-      anchorLocal = h.root.worldToLocal(_v.copy(this.zipTarget)).clone();
+      anchorLocal = h.root.worldToLocal(_v.copy(this.zipTarget));
     }
 
     h.update(dt, {
@@ -486,25 +545,22 @@ export class LocalPlayer {
       Math.cos(this.yaw) * Math.cos(this.pitch)
     );
 
-    // Pull the camera in if a building is in the way. Four offset probes around
-    // the centre ray stop the camera from slicing through corners and railings.
+    // Pull the camera in if a building is in the way. A few offset probes
+    // around the centre ray stop the camera from slicing through corners.
     let dist = targetDist;
     const side = _v3.set(dir.z, 0, -dir.x).normalize();
-    const probes = [
-      [0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55],
-    ];
-    const from = new THREE.Vector3();
-    const d = dir.clone();
-    for (const [su, sv] of probes) {
-      from.copy(head).addScaledVector(side, su).add(new THREE.Vector3(0, sv, 0));
-      const hit = this.world.raycast(from, d, targetDist + 1.4);
+    const from = _v4;
+    for (const [su, sv] of CAM_PROBES) {
+      from.copy(head).addScaledVector(side, su);
+      from.y += sv;
+      const hit = this.world.raycast(from, dir, targetDist + 1.4);
       if (hit) dist = Math.min(dist, Math.max(2.6, hit.dist - 1.1));
     }
     // Once the camera is right on top of the hero, hide the model so the view
     // is not filled with the inside of a shoulder.
     this.hero.root.visible = this.alive && dist > 3.4;
 
-    const want = _v3.copy(head).addScaledVector(dir, dist);
+    const want = _v5.copy(head).addScaledVector(dir, dist);
     const k = 1 - Math.pow(0.0008, dt);
     this.camPos.lerp(want, dead ? k * 0.5 : k);
     this.camera.position.copy(this.camPos);
@@ -517,7 +573,10 @@ export class LocalPlayer {
     // Speed FOV + a touch of shake.
     const targetFov = 70 + THREE.MathUtils.clamp((this.speed - 16) * 0.55, 0, 26);
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 4);
-    this.camera.fov = this.fov;
+    if (Math.abs(this.camera.fov - this.fov) > 0.01) {
+      this.camera.fov = this.fov;
+      this.camera.updateProjectionMatrix();
+    }
     if (this.shake > 0.001) {
       this.shake *= Math.pow(0.02, dt);
       const s = this.shake;
@@ -525,7 +584,6 @@ export class LocalPlayer {
       this.camera.position.y += (Math.random() - 0.5) * s;
       this.camera.position.z += (Math.random() - 0.5) * s;
     }
-    this.camera.updateProjectionMatrix();
   }
 
   netState() {
