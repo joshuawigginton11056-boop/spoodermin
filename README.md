@@ -68,9 +68,12 @@ to keep you moving, not enough to hold the trigger down forever.
 Every asset is **generated procedurally at runtime** — there are no model files,
 no textures on disk and nothing downloaded at load time:
 
-- **The hero** is built from boxes, icosahedra and a hand-written animation rig
-  (idle, run, airborne, swinging, wall-cling and a web-shooting arm snap). The
-  suit's web lattice and the chest spider are painted into `<canvas>` elements.
+- **The hero** is built from capsules and spheres — rounded limbs with ball
+  joints, a tapered capsule chest, a spherical head — driven by a hand-written
+  animation rig (idle, run, airborne, swinging, wall-cling and a web-shooting
+  arm snap). The suit's web lattice and the chest spider are painted into
+  `<canvas>` elements. Each limb and its joint ball share one merged geometry,
+  so a full lobby of heroes stays cheap to draw.
 - **The city** — skyscrapers with tiled window textures, art-deco setbacks,
   antennae, storefronts with neon signs and striped awnings, parks, street
   lamps, parked cars and two elevated highways — is generated from a seed and

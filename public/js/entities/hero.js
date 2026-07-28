@@ -1,27 +1,52 @@
-// The playable superhero: a low-poly, flat-shaded, web-suited figure built
-// entirely from primitives, with a hand-written procedural animation rig
+// The playable superhero: a rounded, cartoon, web-suited figure built entirely
+// from capsules and spheres, with a hand-written procedural animation rig
 // (idle / run / airborne / swinging / wall-cling / shooting).
 
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { SKINS, PLAYER } from '/shared/constants.js';
 import { suitTexture, emblemTexture } from '../util/textures.js';
 
 const S = {
-  THIGH: 0.72,
-  SHIN: 0.72,
-  TORSO: 1.12,
-  UPPER: 0.62,
-  FORE: 0.6,
-  HEAD: 0.34,
+  THIGH: 0.66,
+  SHIN: 0.64,
+  TORSO: 1.16,
+  UPPER: 0.6,
+  FORE: 0.58,
+  HEAD: 0.36,
 };
-const HIP_Y = S.THIGH + S.SHIN + 0.1; // ~1.54
-const SHOULDER_Y = HIP_Y + S.TORSO * 0.86;
+const HIP_Y = S.THIGH + S.SHIN + 0.12; // ~1.42
+const SHOULDER_Y = HIP_Y + S.TORSO * 0.84;
+const NECK_Y = S.TORSO + 0.27; // above the hips — clears the top of the chest
+// Crown of the head in local units; used to normalise the rig to PLAYER.HEIGHT.
+const TOP_Y = HIP_Y + NECK_Y + S.HEAD * 1.05;
 
-function limbGeo(w, len, d) {
-  // Boxes are pivoted at the top so rotating the group swings the limb.
-  const g = new THREE.BoxGeometry(w, len, d);
+// Segment counts: high enough to read as genuinely round, low enough that
+// sixteen of these on screen stays cheap.
+const CAP_SEGS = 5;
+const RADIAL = 12;
+
+// A capsule pivoted at its top, so rotating the parent group swings the limb
+// from the joint like a real arm or leg.
+function limbGeo(radius, len, squashZ = 1) {
+  const body = Math.max(0.02, len - radius * 2);
+  const g = new THREE.CapsuleGeometry(radius, body, CAP_SEGS, RADIAL);
+  if (squashZ !== 1) g.scale(1, 1, squashZ);
   g.translate(0, -len / 2, 0);
   return g;
+}
+
+// A sphere used to fill a joint so limbs never show a seam when they bend.
+function jointGeo(radius, sy = 1) {
+  const g = new THREE.SphereGeometry(radius, RADIAL, 8);
+  if (sy !== 1) g.scale(1, sy, 1);
+  return g;
+}
+
+// A limb plus the ball at its joint, as one geometry — same material, same
+// group, so there is no reason to spend two draw calls on it.
+function boneGeo(jointR, limbR, len) {
+  return BufferGeometryUtils.mergeGeometries([jointGeo(jointR), limbGeo(limbR, len)], false);
 }
 
 export class Hero {
@@ -40,8 +65,8 @@ export class Hero {
     const sk = this.skin;
     const suit = suitTexture(sk.primary, sk.accent);
     const matPrimary = new THREE.MeshLambertMaterial({ map: suit, color: 0xffffff });
-    const matSecondary = new THREE.MeshLambertMaterial({ color: sk.secondary, flatShading: true });
-    const matAccent = new THREE.MeshLambertMaterial({ color: sk.accent, flatShading: true });
+    const matSecondary = new THREE.MeshLambertMaterial({ color: sk.secondary });
+    const matAccent = new THREE.MeshLambertMaterial({ color: sk.accent });
     this.materials = [matPrimary, matSecondary, matAccent];
 
     const add = (parent, geo, mat, x = 0, y = 0, z = 0) => {
@@ -58,72 +83,85 @@ export class Hero {
     this.hips.position.y = HIP_Y;
     this.root.add(this.hips);
 
-    const torsoGeo = new THREE.BoxGeometry(0.86, S.TORSO, 0.5);
+    // A capsule flattened front-to-back gives a rounded chest with no hard
+    // edges anywhere on the silhouette.
+    const torsoGeo = new THREE.CapsuleGeometry(0.42, S.TORSO - 0.84, CAP_SEGS, RADIAL);
+    torsoGeo.scale(1.04, 1, 0.66);
     torsoGeo.translate(0, S.TORSO / 2, 0);
-    // Taper the waist for a more heroic silhouette.
+    // Pinch the waist and swell the chest for a heroic silhouette.
     const tp = torsoGeo.attributes.position;
     for (let i = 0; i < tp.count; i++) {
-      if (tp.getY(i) < S.TORSO * 0.5) {
-        tp.setX(i, tp.getX(i) * 0.78);
-        tp.setZ(i, tp.getZ(i) * 0.86);
-      }
+      const y = tp.getY(i) / S.TORSO; // 0 at the waist, 1 at the collar
+      const taper = 0.76 + 0.42 * Math.min(1, Math.max(0, y)) ** 1.3;
+      tp.setX(i, tp.getX(i) * taper);
+      tp.setZ(i, tp.getZ(i) * (0.86 + 0.2 * y));
     }
     tp.needsUpdate = true;
     torsoGeo.computeVertexNormals();
     this.torso = add(this.hips, torsoGeo, matPrimary);
 
-    // Chest emblem.
+    // Chest emblem, bowed slightly so it sits on the curve of the chest.
+    const emblemGeo = new THREE.SphereGeometry(0.42, 16, 12, Math.PI / 2 - 0.62, 1.24, 0.95, 0.85);
     const emblem = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.55, 0.55),
-      new THREE.MeshBasicMaterial({ map: emblemTexture(sk.accent), transparent: true, depthWrite: false })
+      emblemGeo,
+      new THREE.MeshBasicMaterial({ map: emblemTexture(sk.accent), transparent: true, depthWrite: false, side: THREE.DoubleSide })
     );
-    emblem.position.set(0, S.TORSO * 0.62, 0.26);
+    emblem.position.set(0, S.TORSO * 0.63, 0.02);
+    emblem.scale.set(0.96, 0.96, 0.76);
     this.torso.add(emblem);
 
-    // Belt.
-    const belt = add(this.hips, new THREE.BoxGeometry(0.78, 0.16, 0.46), matAccent, 0, 0.04, 0);
-    belt.scale.set(1.02, 1, 1.02);
+    // Belt: a torus, so it reads as a band wrapped around a round waist.
+    const beltGeo = new THREE.TorusGeometry(0.33, 0.075, 8, RADIAL);
+    beltGeo.rotateX(Math.PI / 2);
+    beltGeo.scale(1.06, 1, 0.72);
+    add(this.hips, beltGeo, matAccent, 0, 0.06, 0);
 
     // --------------------------------------------------------------- head
     this.neck = new THREE.Group();
-    this.neck.position.y = SHOULDER_Y - HIP_Y + 0.26;
+    this.neck.position.y = NECK_Y;
     this.hips.add(this.neck);
-    const headGeo = new THREE.IcosahedronGeometry(S.HEAD, 1);
-    headGeo.scale(0.94, 1.06, 0.98);
+    // Neck stub so the head does not float off the shoulders when it turns.
+    add(this.hips, limbGeo(0.135, 0.3), matPrimary, 0, NECK_Y + 0.06, 0);
+    const headGeo = new THREE.SphereGeometry(S.HEAD, 20, 16);
+    headGeo.scale(0.95, 1.05, 0.99);
     this.head = add(this.neck, headGeo, matPrimary);
 
-    // Big cartoon lenses.
+    // Big cartoon lenses. Both sides are baked into one geometry per layer, so
+    // the whole face costs two draw calls instead of four.
     const eyeMat = new THREE.MeshBasicMaterial({ color: sk.eye });
     const rimMat = new THREE.MeshBasicMaterial({ color: sk.accent });
-    for (const side of [-1, 1]) {
-      const rim = new THREE.Mesh(new THREE.SphereGeometry(0.155, 10, 8), rimMat);
-      rim.position.set(side * 0.145, 0.03, S.HEAD * 0.84);
-      rim.scale.set(1.18, 0.86, 0.42);
-      rim.rotation.z = side * -0.32;
-      this.head.add(rim);
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.135, 10, 8), eyeMat);
-      eye.position.set(side * 0.145, 0.035, S.HEAD * 0.9);
-      eye.scale.set(1.18, 0.86, 0.4);
-      eye.rotation.z = side * -0.32;
-      this.head.add(eye);
-    }
+    const lens = (radius, z) => {
+      const halves = [-1, 1].map((side) => {
+        const g = new THREE.SphereGeometry(radius, 14, 10);
+        g.scale(1.18, 0.88, 0.45);
+        g.rotateZ(side * -0.32);
+        g.translate(side * 0.145, 0.03, z);
+        return g;
+      });
+      return BufferGeometryUtils.mergeGeometries(halves, false);
+    };
+    this.head.add(new THREE.Mesh(lens(0.16, S.HEAD * 0.8), rimMat));
+    this.head.add(new THREE.Mesh(lens(0.138, S.HEAD * 0.86), eyeMat));
+    this.materials.push(eyeMat, rimMat);
 
     // --------------------------------------------------------------- arms
     this.arms = [];
     for (const side of [-1, 1]) {
       const shoulder = new THREE.Group();
-      shoulder.position.set(side * 0.52, SHOULDER_Y - HIP_Y, 0);
+      shoulder.position.set(side * 0.46, SHOULDER_Y - HIP_Y, 0);
       this.hips.add(shoulder);
-      add(shoulder, limbGeo(0.3, S.UPPER, 0.3), matPrimary);
+      // Deltoid ball caps the shoulder so the arm can swing to any angle.
+      add(shoulder, boneGeo(0.2, 0.16, S.UPPER), matPrimary);
       const elbow = new THREE.Group();
       elbow.position.y = -S.UPPER;
       shoulder.add(elbow);
-      add(elbow, limbGeo(0.26, S.FORE, 0.26), matSecondary);
+      add(elbow, boneGeo(0.145, 0.138, S.FORE), matSecondary);
       // Glove.
       const hand = new THREE.Group();
       hand.position.y = -S.FORE;
       elbow.add(hand);
-      add(hand, new THREE.BoxGeometry(0.3, 0.28, 0.3), matPrimary, 0, -0.1, 0);
+      const glove = add(hand, jointGeo(0.155), matPrimary, 0, -0.06, 0);
+      glove.scale.set(1, 1.15, 0.92);
       this.arms.push({ side, shoulder, elbow, hand });
     }
 
@@ -131,21 +169,27 @@ export class Hero {
     this.legs = [];
     for (const side of [-1, 1]) {
       const hip = new THREE.Group();
-      hip.position.set(side * 0.22, 0, 0);
+      hip.position.set(side * 0.2, 0, 0);
       this.hips.add(hip);
-      add(hip, limbGeo(0.32, S.THIGH, 0.34), matSecondary);
+      add(hip, boneGeo(0.2, 0.185, S.THIGH), matSecondary);
       const knee = new THREE.Group();
       knee.position.y = -S.THIGH;
       hip.add(knee);
-      add(knee, limbGeo(0.28, S.SHIN, 0.3), matSecondary);
+      add(knee, boneGeo(0.16, 0.15, S.SHIN), matSecondary);
       const foot = new THREE.Group();
       foot.position.y = -S.SHIN;
       knee.add(foot);
-      add(foot, new THREE.BoxGeometry(0.32, 0.2, 0.56), matPrimary, 0, -0.08, 0.1);
+      // Boot: a capsule lying forward, so the toe is a dome rather than a corner.
+      const bootGeo = new THREE.CapsuleGeometry(0.15, 0.24, CAP_SEGS, RADIAL);
+      bootGeo.rotateX(Math.PI / 2);
+      bootGeo.scale(1, 0.86, 1);
+      add(foot, bootGeo, matPrimary, 0, -0.05, 0.1);
       this.legs.push({ side, hip, knee, foot });
     }
 
-    this.root.scale.setScalar(PLAYER.HEIGHT / 3.4);
+    // Normalise the rig so the crown of the head lands exactly at the collision
+    // capsule's height, whatever the proportions above happen to add up to.
+    this.root.scale.setScalar(PLAYER.HEIGHT / TOP_Y);
   }
 
   dispose() {
