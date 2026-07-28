@@ -75,6 +75,10 @@ export const MATCH = {
 export const STORM = {
   DAMAGE_START: 2.5, // hp/sec outside the safe zone in phase 1
   DAMAGE_RAMP: 1.6, // added per phase
+  // Once the last phase is done the zone closes to nothing over this many
+  // seconds. Holding a small final ring forever only worked while everyone was
+  // shooting at each other; it leaves a match that can never end otherwise.
+  FINAL_COLLAPSE: 22,
   PHASES: [
     { hold: 35, shrink: 30, radius: 0.72 },
     { hold: 28, shrink: 26, radius: 0.5 },

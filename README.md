@@ -76,7 +76,8 @@ to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.
 2. **Drop in** — everyone spawns on rooftops, streets and elevated highways
    scattered across a freshly generated city.
 3. **The web closes in** — a shrinking safe zone drives everyone together over
-   six phases. Outside the storm curtain you take escalating damage.
+   six phases, then closes to nothing. Outside the storm curtain you take
+   escalating damage.
 4. **Last hero swinging wins.** Getting eliminated drops you into spectator
    mode; the results board and a fresh city follow shortly after.
 
@@ -152,9 +153,11 @@ which stops shadow edges crawling as you move. Current tier and average frame
 time are readable from the console as `__spoodermin.quality` and
 `__spoodermin.frameAvg`, and `__spoodermin.setQuality(0..3)` pins one.
 
-**Bots** are simulated entirely on the server and behave like extra players:
-they path toward the safe zone, orbit their target, take line-of-sight shots
-with lead and a miss cone, and hop when they bump into a wall.
+**Bots** are simulated entirely on the server, and they are non-combatants.
+They wander between points inside the safe zone, sprint for the middle when the
+storm catches them out, and hop when they bump into a wall — but they never
+pick a target and never fire. You can web them; they will not web you back. The
+only things that can take a human's health are the storm and another human.
 
 No build step — the browser loads `three` through an import map served straight
 out of `node_modules`.
