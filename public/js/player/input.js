@@ -1,4 +1,9 @@
-// Keyboard + pointer-lock mouse input.
+// Keyboard + mouse input.
+//
+// Pointer lock is the good path. Some embedding contexts (a sandboxed iframe
+// without the pointer-lock permission, for instance) refuse it, so there is a
+// steer-with-the-cursor fallback that keeps the game fully playable: the
+// further the cursor sits from the middle of the canvas, the faster you turn.
 
 export class Input {
   constructor(canvas) {
@@ -6,54 +11,118 @@ export class Input {
     this.keys = new Set();
     this.pressed = new Set(); // edge-triggered, cleared each frame
     this.mouse = { dx: 0, dy: 0, left: false, right: false, leftEdge: false, rightEdge: false, wheel: 0 };
-    this.locked = false;
+    this.cursor = { x: 0, y: 0 };
+    this.pointerLocked = false;
+    this.freeLook = false;
+    this.active = false; // controls engaged, by either method
     this.enabled = true;
     this.onLockChange = null;
+    this.onFreeLook = null;
+    this._lockProbe = null;
 
     addEventListener('keydown', (e) => {
       if (e.repeat) return;
       const k = e.code;
       this.keys.add(k);
       this.pressed.add(k);
-      if (this.locked && (k === 'Space' || k === 'Tab')) e.preventDefault();
+      if (this.active && (k === 'Space' || k === 'Tab')) e.preventDefault();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.code));
     addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; });
 
     canvas.addEventListener('mousedown', (e) => {
-      if (!this.locked) return;
+      if (!this.active) return;
       if (e.button === 0) { this.mouse.left = true; this.mouse.leftEdge = true; }
       if (e.button === 2) { this.mouse.right = true; this.mouse.rightEdge = true; }
+      e.preventDefault();
     });
     addEventListener('mouseup', (e) => {
       if (e.button === 0) this.mouse.left = false;
       if (e.button === 2) this.mouse.right = false;
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    addEventListener('wheel', (e) => { if (this.locked) this.mouse.wheel += Math.sign(e.deltaY); }, { passive: true });
+    addEventListener('wheel', (e) => { if (this.active) this.mouse.wheel += Math.sign(e.deltaY); }, { passive: true });
 
     addEventListener('mousemove', (e) => {
-      if (!this.locked) return;
+      const r = canvas.getBoundingClientRect();
+      this.cursor.x = e.clientX - r.left;
+      this.cursor.y = e.clientY - r.top;
+      if (!this.pointerLocked) return;
       this.mouse.dx += e.movementX || 0;
       this.mouse.dy += e.movementY || 0;
     });
 
     document.addEventListener('pointerlockchange', () => {
-      this.locked = document.pointerLockElement === canvas;
-      if (!this.locked) { this.keys.clear(); this.mouse.left = this.mouse.right = false; }
-      if (this.onLockChange) this.onLockChange(this.locked);
+      this.pointerLocked = document.pointerLockElement === canvas;
+      clearTimeout(this._lockProbe);
+      if (this.pointerLocked) {
+        this.freeLook = false;
+        this.active = true;
+      } else if (!this.freeLook) {
+        this.active = false;
+        this.keys.clear();
+        this.mouse.left = this.mouse.right = false;
+      }
+      if (this.onLockChange) this.onLockChange(this.active);
     });
   }
 
+  /** Back-compat alias: "are the controls engaged?" */
+  get locked() { return this.active; }
+  set locked(v) { this.active = !!v; }
+
   lock() {
-    const p = this.canvas.requestPointerLock?.({ unadjustedMovement: true });
-    if (p && p.catch) p.catch(() => this.canvas.requestPointerLock());
+    if (this.freeLook) { this.active = true; return; }
+    if (!this.canvas.requestPointerLock) { this.useFreeLook(); return; }
+    try {
+      const p = this.canvas.requestPointerLock({ unadjustedMovement: true });
+      if (p && p.catch) p.catch(() => { try { this.canvas.requestPointerLock(); } catch { /* probe handles it */ } });
+    } catch {
+      try { this.canvas.requestPointerLock(); } catch { this.useFreeLook(); return; }
+    }
+    // If the lock never lands (permission denied, sandboxed frame), fall back.
+    clearTimeout(this._lockProbe);
+    this._lockProbe = setTimeout(() => {
+      if (!this.pointerLocked) this.useFreeLook();
+    }, 700);
   }
 
-  unlock() { document.exitPointerLock?.(); }
+  useFreeLook() {
+    if (this.freeLook) { this.active = true; return; }
+    this.freeLook = true;
+    this.active = true;
+    this.canvas.style.cursor = 'crosshair';
+    if (this.onFreeLook) this.onFreeLook();
+    if (this.onLockChange) this.onLockChange(true);
+  }
+
+  unlock() {
+    document.exitPointerLock?.();
+    if (this.freeLook) {
+      this.active = false;
+      this.keys.clear();
+      this.mouse.left = this.mouse.right = false;
+      if (this.onLockChange) this.onLockChange(false);
+    }
+  }
 
   down(code) { return this.keys.has(code); }
   hit(code) { return this.pressed.has(code); }
+
+  /** Synthesises look deltas for the cursor-steering fallback. */
+  beginFrame(dt) {
+    if (!this.freeLook || !this.active) return;
+    const r = this.canvas.getBoundingClientRect();
+    const ox = this.cursor.x - r.width / 2;
+    const oy = this.cursor.y - r.height / 2;
+    const mag = Math.hypot(ox, oy);
+    const dead = Math.min(r.width, r.height) * 0.07;
+    if (mag <= dead) return;
+    // Ramp from the edge of the dead zone so small nudges stay gentle.
+    const gain = ((mag - dead) / mag) * 2.0 * dt;
+    this.mouse.dx += ox * gain;
+    this.mouse.dy += oy * gain;
+  }
 
   endFrame() {
     this.pressed.clear();

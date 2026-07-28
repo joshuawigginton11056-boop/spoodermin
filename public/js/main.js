@@ -10,7 +10,7 @@ import { Input } from './player/input.js';
 import { LocalPlayer, STATE } from './player/controller.js';
 import { RemoteManager } from './entities/remote.js';
 import { Effects } from './combat/effects.js';
-import { Net } from './net.js';
+import { createTransport, MULTIPLAYER } from './transport.js';
 import { UI } from './ui.js';
 
 const canvas = document.getElementById('scene');
@@ -35,7 +35,7 @@ const stormWall = new StormWall(scene);
 const effects = new Effects(scene);
 const remotes = new RemoteManager(scene);
 const input = new Input(canvas);
-const net = new Net();
+const net = createTransport();
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -83,7 +83,7 @@ function buildCity(seed) {
 // -------------------------------------------------------------- networking
 function connect() {
   const name = ui.el.nameInput.value.trim();
-  localStorage.setItem('spoodermin.name', name);
+  try { localStorage.setItem('spoodermin.name', name); } catch { /* sandboxed iframe */ }
   ui.el.playBtn.disabled = true;
   ui.status('connecting…');
 
@@ -136,6 +136,11 @@ canvas.addEventListener('click', () => {
 });
 input.onLockChange = (locked) => {
   if (!locked && game.started) ui.status('paused — click to resume');
+};
+// Pointer lock can be refused (sandboxed iframe); say so once and explain the
+// cursor-steering fallback rather than leaving the player unable to turn.
+input.onFreeLook = () => {
+  ui.toast('MOUSE-LOOK MODE', 'Steer by moving the cursor away from the centre', 5);
 };
 
 // ------------------------------------------------------------ net handlers
@@ -304,6 +309,7 @@ function frame(now) {
   last = now;
   if (dt > 0.1) dt = 0.1;
 
+  input.beginFrame(dt);
   const spectatingNobody = game.started && game.player && !game.player.alive && !game.spectateId;
   if (!game.started || spectatingNobody) cinematicCamera(dt);
 

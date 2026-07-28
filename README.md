@@ -24,6 +24,19 @@ AI heroes, so a solo player still gets a full 8-hero battle royale.
 
 Set `PORT` to run somewhere other than 3000.
 
+### Single-file offline build
+
+```bash
+npm run build:standalone     # → dist/spoodermin-standalone.html
+```
+
+Produces one self-contained HTML file you can open straight off disk or host
+anywhere static — no server, no network, no assets. The match server in
+`server/game.js` is plain JS over the shared modules, so the offline build
+swaps `transport.js` for `transport-local.js` and runs that same `Room` inside
+the browser tab: identical bots, storm, and server-side hit detection, just
+without other humans.
+
 ---
 
 ## Controls
@@ -41,6 +54,10 @@ Set `PORT` to run somewhere other than 3000.
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
 | `Esc` | Release the mouse (click the canvas to grab it again) |
+
+If the browser refuses pointer lock — a sandboxed iframe, for instance — the
+game says so and switches to cursor steering: the further the cursor sits from
+the middle of the screen, the faster you turn. Everything else is unchanged.
 
 **Wall-crawling:** hold a movement key into a wall while airborne and you stick
 to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.

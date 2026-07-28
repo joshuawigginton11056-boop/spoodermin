@@ -49,7 +49,7 @@ export class UI {
     this.feedItems = [];
     this.myId = 0;
 
-    this.el.nameInput.value = localStorage.getItem('spoodermin.name') || '';
+    try { this.el.nameInput.value = localStorage.getItem('spoodermin.name') || ''; } catch { /* sandboxed iframe */ }
   }
 
   // ------------------------------------------------------------- overlays
