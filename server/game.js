@@ -5,12 +5,57 @@
 // eliminations and placements. Bots are simulated entirely here so a solo
 // player still gets a full battle royale lobby.
 
-import { COMBAT, MATCH, PHASE, PLAYER, SKINS, HERO_NAMES, STORM, CITY } from '../shared/constants.js';
+import { BOT, COMBAT, MATCH, PHASE, PLAYER, SKINS, HERO_NAMES, STORM, CITY } from '../shared/constants.js';
 import { generateCity, raycastCity, aabbContains } from '../shared/citygen.js';
 
 const STATE = { IDLE: 0, RUN: 1, AIR: 2, SWING: 3, CLING: 4, ZIP: 5 };
 
 let nextEntityId = 1;
+
+/**
+ * Closest approach between two segments, p0->p1 and q0->q1.
+ * Returns the squared distance and how far along the first segment it happens.
+ * Used to test a web ball's path for the tick against a player's hit capsule:
+ * sampling points instead lets fast shots step straight through a hero.
+ */
+function segmentClosest(p0, p1, q0, q1) {
+  const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+  const vx = q1[0] - q0[0], vy = q1[1] - q0[1], vz = q1[2] - q0[2];
+  const wx = p0[0] - q0[0], wy = p0[1] - q0[1], wz = p0[2] - q0[2];
+  const a = ux * ux + uy * uy + uz * uz;
+  const b = ux * vx + uy * vy + uz * vz;
+  const c = vx * vx + vy * vy + vz * vz;
+  const d = ux * wx + uy * wy + uz * wz;
+  const e = vx * wx + vy * wy + vz * wz;
+  const det = a * c - b * b;
+  const EPS = 1e-9;
+  let sN, sD = det, tN, tD = det;
+
+  if (det < EPS) { sN = 0; sD = 1; tN = e; tD = c; } // near parallel
+  else {
+    sN = b * e - c * d;
+    tN = a * e - b * d;
+    if (sN < 0) { sN = 0; tN = e; tD = c; }
+    else if (sN > sD) { sN = sD; tN = e + b; tD = c; }
+  }
+  if (tN < 0) {
+    tN = 0;
+    if (-d < 0) sN = 0;
+    else if (-d > a) sN = sD;
+    else { sN = -d; sD = a; }
+  } else if (tN > tD) {
+    tN = tD;
+    if (-d + b < 0) sN = 0;
+    else if (-d + b > a) sN = sD;
+    else { sN = -d + b; sD = a; }
+  }
+  const s = Math.abs(sN) < EPS ? 0 : sN / sD;
+  const t = Math.abs(tN) < EPS ? 0 : tN / tD;
+  const dx = wx + s * ux - t * vx;
+  const dy = wy + s * uy - t * vy;
+  const dz = wz + s * uz - t * vz;
+  return { d2: dx * dx + dy * dy + dz * dz, s };
+}
 
 export class Room {
   constructor(id = 'main') {
@@ -75,8 +120,13 @@ export class Room {
       lastShot: -99,
       slowUntil: 0,
       lastSeen: Date.now(),
+      hist: [], // recent positions, for rewinding shots (see histPos)
       // bot brain
-      bot: isBot ? { target: null, think: 0, wander: [0, 0, 0], jumpAt: 0, strafe: 1 } : null,
+      bot: isBot ? {
+        target: null, think: 0, wander: [0, 0, 0], jumpAt: 0, strafe: 1,
+        nextShot: 0,
+        aim: BOT.AIM_MIN + Math.random() * (BOT.AIM_MAX - BOT.AIM_MIN),
+      } : null,
     };
     this.players.set(id, p);
     return p;
@@ -134,6 +184,7 @@ export class Room {
   spawn(p) {
     p.pos = this.pickSpawn();
     p.vel = [0, 0, 0];
+    p.hist.length = 0; // no rewinding to where they stood last life
     p.hp = COMBAT.MAX_HEALTH;
     p.fluid = COMBAT.FLUID_MAX;
     p.alive = true;
@@ -260,7 +311,38 @@ export class Room {
   }
 
   // ------------------------------------------------------------- shooting
-  handleShoot(p, origin, dir) {
+  /** Remember where everyone is, so a client's shot can be judged against the
+   *  world as that client saw it rather than the world a fifth of a second on. */
+  recordHistory() {
+    for (const p of this.players.values()) {
+      p.hist.push({ t: this.now, x: p.pos[0], y: p.pos[1], z: p.pos[2] });
+      while (p.hist.length > 2 && this.now - p.hist[0].t > COMBAT.LAG_COMP_MAX + 0.5) p.hist.shift();
+      if (p.hist.length > 64) p.hist.shift();
+    }
+  }
+
+  /** Where `p` was at time `t`, interpolated between recorded samples. */
+  histPos(p, t, out) {
+    const h = p.hist;
+    if (!h.length) { out[0] = p.pos[0]; out[1] = p.pos[1]; out[2] = p.pos[2]; return out; }
+    const last = h[h.length - 1];
+    if (t >= last.t) { out[0] = p.pos[0]; out[1] = p.pos[1]; out[2] = p.pos[2]; return out; }
+    if (t <= h[0].t) { out[0] = h[0].x; out[1] = h[0].y; out[2] = h[0].z; return out; }
+    for (let i = h.length - 1; i > 0; i--) {
+      const a = h[i - 1];
+      if (a.t > t) continue;
+      const b = h[i];
+      const k = (t - a.t) / Math.max(1e-4, b.t - a.t);
+      out[0] = a.x + (b.x - a.x) * k;
+      out[1] = a.y + (b.y - a.y) * k;
+      out[2] = a.z + (b.z - a.z) * k;
+      return out;
+    }
+    out[0] = last.x; out[1] = last.y; out[2] = last.z;
+    return out;
+  }
+
+  handleShoot(p, origin, dir, rewind = 0) {
     const now = this.now;
     if (!p.alive) return;
     if (now - p.lastShot < COMBAT.FIRE_COOLDOWN) return;
@@ -276,12 +358,17 @@ export class Room {
     }
     p.lastShot = now;
     p.fluid -= COMBAT.FLUID_PER_SHOT;
+    // The ball is simulated `lag` seconds behind wall clock for its whole
+    // flight, so every frame of it is tested against the world the shooter was
+    // looking at. Bots pass no rewind and so play against the live world.
+    const lag = Math.min(COMBAT.LAG_COMP_MAX, Math.max(0, Number(rewind) || 0));
     const proj = {
       id: nextEntityId++,
       owner: p.id,
       pos: [origin[0], origin[1], origin[2]],
       vel: [d[0] * COMBAT.SHOT_SPEED, d[1] * COMBAT.SHOT_SPEED, d[2] * COMBAT.SHOT_SPEED],
       life: COMBAT.PROJECTILE_LIFE,
+      time: now - lag,
     };
     this.projectiles.push(proj);
     this.events.push({
@@ -293,6 +380,12 @@ export class Room {
 
   updateProjectiles(dt) {
     const keep = [];
+    const from = [0, 0, 0];
+    const to = [0, 0, 0];
+    const cap0 = [0, 0, 0];
+    const cap1 = [0, 0, 0];
+    const at = [0, 0, 0];
+    const reach = COMBAT.HIT_RADIUS + COMBAT.SHOT_RADIUS;
     for (const pr of this.projectiles) {
       pr.life -= dt;
       if (pr.life <= 0) { this.events.push({ t: 'despawn', id: pr.id }); continue; }
@@ -302,25 +395,35 @@ export class Room {
       let dead = false;
       for (let s = 0; s < steps && !dead; s++) {
         pr.vel[1] -= COMBAT.SHOT_GRAVITY * h;
+        pr.time += h;
         const nx = pr.pos[0] + pr.vel[0] * h;
         const ny = pr.pos[1] + pr.vel[1] * h;
         const nz = pr.pos[2] + pr.vel[2] * h;
 
-        // Players first.
+        // Players first: sweep this substep's whole path against each hero's
+        // hit capsule, at the moment in time this ball is judging.
+        from[0] = pr.pos[0]; from[1] = pr.pos[1]; from[2] = pr.pos[2];
+        to[0] = nx; to[1] = ny; to[2] = nz;
+        let victim = null;
+        let victimAt = 2;
         for (const p of this.players.values()) {
           if (!p.alive || p.id === pr.owner) continue;
-          const cy = p.pos[1] + PLAYER.HEIGHT * 0.5;
-          const dx = nx - p.pos[0];
-          const dy = ny - cy;
-          const dz = nz - p.pos[2];
-          if (dx * dx + dy * dy + dz * dz < COMBAT.HIT_RADIUS * COMBAT.HIT_RADIUS) {
-            this.damagePlayer(p, this.players.get(pr.owner) || null, COMBAT.SHOT_DAMAGE, [nx, ny, nz]);
-            this.events.push({ t: 'splat', id: pr.id, p: [+nx.toFixed(2), +ny.toFixed(2), +nz.toFixed(2)], hit: p.id });
-            dead = true;
-            break;
-          }
+          this.histPos(p, pr.time, at);
+          cap0[0] = at[0]; cap0[1] = at[1] + COMBAT.HIT_LOW; cap0[2] = at[2];
+          cap1[0] = at[0]; cap1[1] = at[1] + COMBAT.HIT_HIGH; cap1[2] = at[2];
+          const near = segmentClosest(from, to, cap0, cap1);
+          // Whoever the ball reaches first along its path takes it.
+          if (near.d2 < reach * reach && near.s < victimAt) { victimAt = near.s; victim = p; }
         }
-        if (dead) break;
+        if (victim) {
+          const ix = from[0] + (to[0] - from[0]) * victimAt;
+          const iy = from[1] + (to[1] - from[1]) * victimAt;
+          const iz = from[2] + (to[2] - from[2]) * victimAt;
+          this.damagePlayer(victim, this.players.get(pr.owner) || null, COMBAT.SHOT_DAMAGE, [ix, iy, iz]);
+          this.events.push({ t: 'splat', id: pr.id, p: [+ix.toFixed(2), +iy.toFixed(2), +iz.toFixed(2)], hit: victim.id });
+          dead = true;
+          break;
+        }
 
         // Then the city.
         if (ny <= 0.2) {
@@ -395,7 +498,10 @@ export class Room {
         const weight = o.isBot ? d * 1.5 : d * 0.7;
         if (weight < bestD) { bestD = weight; best = o; }
       }
+      const switched = b.target !== (best ? best.id : null);
       b.target = best ? best.id : null;
+      // Give the player a beat to react when a bot swings its attention over.
+      if (switched && best) b.nextShot = Math.max(b.nextShot, this.now + BOT.REACTION);
       b.strafe = Math.random() < 0.5 ? -1 : 1;
       if (!best) {
         const ang = Math.random() * Math.PI * 2;
@@ -484,29 +590,30 @@ export class Room {
     p.state = !p.grounded ? STATE.AIR : (Math.hypot(p.vel[0], p.vel[2]) > 1.5 ? STATE.RUN : STATE.IDLE);
 
     // Fire at the target if roughly lined up and nothing solid is in between.
-    if (target && target.alive && p.fluid > COMBAT.FLUID_PER_SHOT * 2) {
+    if (target && target.alive && p.fluid > COMBAT.FLUID_PER_SHOT * 2 && this.now >= b.nextShot) {
       const eye = [p.pos[0], p.pos[1] + PLAYER.EYE * 0.8, p.pos[2]];
       const tc = [target.pos[0], target.pos[1] + PLAYER.HEIGHT * 0.55, target.pos[2]];
       const dx = tc[0] - eye[0], dy = tc[1] - eye[1], dz = tc[2] - eye[2];
       const dist = Math.hypot(dx, dy, dz);
-      if (dist < 95) {
+      if (dist < BOT.RANGE) {
         const dir = [dx / dist, dy / dist, dz / dist];
         const hit = raycastCity(this.city.colliders, eye, dir, dist);
         if (!hit) {
           // Lead the shot and add a miss cone so bots are beatable.
           const flight = dist / COMBAT.SHOT_SPEED;
           const lead = [
-            tc[0] + target.vel[0] * flight * 0.8,
+            tc[0] + target.vel[0] * flight * BOT.LEAD,
             tc[1] + target.vel[1] * flight * 0.5 + COMBAT.SHOT_GRAVITY * flight * flight * 0.5,
-            tc[2] + target.vel[2] * flight * 0.8,
+            tc[2] + target.vel[2] * flight * BOT.LEAD,
           ];
           let ax = lead[0] - eye[0], ay = lead[1] - eye[1], az = lead[2] - eye[2];
           const al = Math.hypot(ax, ay, az) || 1;
-          const spread = 0.035 + dist / 1400;
+          const spread = (BOT.SPREAD + dist / BOT.SPREAD_FALLOFF) * b.aim;
           ax = ax / al + (Math.random() - 0.5) * spread;
           ay = ay / al + (Math.random() - 0.5) * spread;
           az = az / al + (Math.random() - 0.5) * spread;
           this.handleShoot(p, eye, [ax, ay, az]);
+          b.nextShot = this.now + BOT.FIRE_GAP + Math.random() * BOT.FIRE_JITTER;
         }
       }
     }
@@ -552,6 +659,9 @@ export class Room {
           // Fell out of the world somehow.
           if (p.pos[1] < -60) this.damagePlayer(p, null, 999, p.pos);
         }
+        // Logged after everyone has moved and before any ball is stepped, so
+        // the newest sample is the truth this tick.
+        this.recordHistory();
         this.updateProjectiles(dt);
         if (this.pendingWrap) {
           this.timer -= dt;
@@ -660,7 +770,7 @@ export class Room {
         break;
       }
       case 'shoot':
-        if (Array.isArray(msg.o) && Array.isArray(msg.d)) this.handleShoot(p, msg.o, msg.d);
+        if (Array.isArray(msg.o) && Array.isArray(msg.d)) this.handleShoot(p, msg.o, msg.d, msg.r);
         break;
       case 'zip':
         if (p.alive && p.fluid >= COMBAT.FLUID_PER_ZIP) p.fluid -= COMBAT.FLUID_PER_ZIP;

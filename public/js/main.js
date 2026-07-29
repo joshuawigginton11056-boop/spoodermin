@@ -1,14 +1,14 @@
 // Boot, wire everything together, run the frame loop.
 
 import * as THREE from 'three';
-import { PHASE, CITY, COMBAT, TICK_RATE } from '/shared/constants.js';
+import { PHASE, CITY, COMBAT, CAMERA, TICK_RATE } from '/shared/constants.js';
 import { City } from './world/city.js';
 import { buildSky } from './world/sky.js';
 import { StormWall } from './world/storm.js';
 import { WorldCollision } from './player/physics.js';
 import { Input } from './player/input.js';
 import { LocalPlayer, STATE } from './player/controller.js';
-import { RemoteManager } from './entities/remote.js';
+import { RemoteManager, INTERP_DELAY } from './entities/remote.js';
 import { Effects } from './combat/effects.js';
 import { createTransport, MULTIPLAYER } from './transport.js';
 import { UI } from './ui.js';
@@ -27,7 +27,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.02;
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.25, CITY.SIZE * 4);
+const camera = new THREE.PerspectiveCamera(CAMERA.FOV, innerWidth / innerHeight, 0.25, CITY.SIZE * 4);
 camera.position.set(0, 80, 60);
 
 const sky = buildSky(scene, 1);
@@ -119,8 +119,20 @@ function connect() {
         input,
         skin: welcome.skin,
         fx: effects,
+        targets: () => remotes.living(),
         onShoot: (muzzle, dir) => {
-          net.send({ t: 'shoot', o: [+muzzle.x.toFixed(2), +muzzle.y.toFixed(2), +muzzle.z.toFixed(2)], d: [+dir.x.toFixed(3), +dir.y.toFixed(3), +dir.z.toFixed(3)] });
+          // Show our own ball immediately. Waiting for the server to echo it
+          // back costs a tick plus the round trip, which reads as the gun
+          // firing late and makes leading a target guesswork.
+          predictShot(muzzle, dir);
+          net.send({
+            t: 'shoot',
+            o: [+muzzle.x.toFixed(2), +muzzle.y.toFixed(2), +muzzle.z.toFixed(2)],
+            d: [+dir.x.toFixed(3), +dir.y.toFixed(3), +dir.z.toFixed(3)],
+            // How far behind the server we were drawing the world when we
+            // pulled the trigger, so it can judge the shot against what we saw.
+            r: +(INTERP_DELAY + Math.min(0.4, (net.ping || 0) / 2000)).toFixed(3),
+          });
         },
         onZip: () => net.send({ t: 'zip' }),
       });
@@ -188,9 +200,31 @@ net.on('state', (msg) => {
   for (const ev of msg.events || []) handleEvent(ev);
 });
 
+// Locally-predicted web balls, oldest first. Each is swapped for the
+// authoritative projectile the moment the server confirms that shot.
+let nextPredictId = 1;
+const predicted = [];
+
+function predictShot(muzzle, dir) {
+  const id = `p${nextPredictId++}`;
+  predicted.push(id);
+  effects.spawnProjectile(
+    id,
+    [muzzle.x, muzzle.y, muzzle.z],
+    [dir.x * COMBAT.SHOT_SPEED, dir.y * COMBAT.SHOT_SPEED, dir.z * COMBAT.SHOT_SPEED]
+  );
+  // If the server never confirms it — it disagreed about cooldown or fluid —
+  // clean the ghost up rather than letting it fly on forever.
+  setTimeout(() => {
+    const i = predicted.indexOf(id);
+    if (i >= 0) { predicted.splice(i, 1); effects.killProjectile(id); }
+  }, 700);
+}
+
 function handleEvent(ev) {
   switch (ev.t) {
     case 'shot': {
+      if (ev.owner === game.myId && predicted.length) effects.killProjectile(predicted.shift());
       effects.spawnProjectile(ev.id, ev.o, ev.v);
       if (ev.owner !== game.myId) {
         const rp = remotes.get(ev.owner);

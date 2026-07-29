@@ -6,7 +6,10 @@ import { Hero } from './hero.js';
 import { SKINS } from '/shared/constants.js';
 import { nameTagTexture } from '../util/textures.js';
 
-const INTERP_DELAY = 0.1;
+// How far in the past remote players are drawn. The server rewinds by this
+// much (plus half the round trip) when judging our shots, so what we shot at is
+// what we hit.
+export const INTERP_DELAY = 0.1;
 const _v = new THREE.Vector3();
 
 class RemotePlayer {
@@ -200,6 +203,13 @@ export class RemoteManager {
   }
 
   get(id) { return this.players.get(id); }
+
+  /** Everyone still standing, as the client is currently drawing them. */
+  living() {
+    const out = [];
+    for (const rp of this.players.values()) if (rp.alive) out.push(rp);
+    return out;
+  }
 
   update(dt, now, camera, effects) {
     for (const rp of this.players.values()) {

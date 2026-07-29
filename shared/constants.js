@@ -31,13 +31,39 @@ export const PLAYER = {
   WALL_JUMP: 15,
 };
 
+// ---------------------------------------------------------------- camera
+// Third-person shoulder rig, Fortnite style: the camera sits behind and to the
+// right of the hero and points along the aim direction, so the body never sits
+// on top of the crosshair.
+export const CAMERA = {
+  DISTANCE: [8.5, 12.5, 5.5], // cycled with V
+  SHOULDER: 2.15, // offset to the camera's right
+  RISE: 0.5, // above eye height
+  MIN_DISTANCE: 2.4, // closest the collision spring arm may pull in
+  HIDE_HERO: 3.6, // hide the model once the arm is shorter than this
+  FOV: 66,
+  FOV_SPEED_FROM: 20, // speed where the FOV starts to widen
+  FOV_SPEED_GAIN: 0.34,
+  FOV_SPEED_MAX: 13, // how much extra FOV top speed can buy
+  FOLLOW_HALFLIFE: 0.05, // position smoothing; rotation is never smoothed
+  PITCH_MIN: -1.15,
+  PITCH_MAX: 1.25,
+  SENSITIVITY: 0.0022,
+};
+
 // ---------------------------------------------------------------- webbing
 export const WEB = {
   MAX_LENGTH: 110, // how far a swing line can reach
-  MIN_LENGTH: 6,
-  REEL_SPEED: 14, // rope shortening while holding the swing button
-  SWING_ACCEL: 30, // player steering force mid-swing
-  RELEASE_BOOST: 1.06,
+  MIN_LENGTH: 8,
+  REEL_SPEED: 10, // rope shortening while holding the reel key
+  SWING_ACCEL: 26, // player steering force mid-swing
+  RELEASE_BOOST: 1.03,
+  MAX_SPEED: 46, // arcs settle to this instead of compounding forever
+  DRAG: 5, // how quickly speed above MAX_SPEED bleeds off (1/s)
+  ROPE_CORRECT: 9, // 1/s — how fast rope stretch is eased away, not snapped
+  PUMP: 0.16, // per-second speed gain on the downswing
+  ATTACH_SLACK: 1.5, // rope starts this much longer than the anchor distance
+  LAUNCH_HOP: 7, // upward kick when starting a swing from a standstill
   ZIP_SPEED: 62, // web-zip pull speed
   ZIP_ARRIVE: 5,
 };
@@ -45,11 +71,24 @@ export const WEB = {
 // ---------------------------------------------------------------- combat
 export const COMBAT = {
   MAX_HEALTH: 100,
-  SHOT_DAMAGE: 13,
-  SHOT_SPEED: 105,
-  SHOT_GRAVITY: 11, // web balls droop a little
+  SHOT_DAMAGE: 15,
+  SHOT_SPEED: 140,
+  SHOT_GRAVITY: 6, // web balls droop a little; the client aims off this
   SHOT_RADIUS: 0.55,
-  HIT_RADIUS: 1.5, // generous player hitsphere, cartoon game
+  // Hit volume: a vertical capsule rather than one sphere at the navel, so a
+  // shot at the head or the feet of a swinging hero counts.
+  HIT_RADIUS: 1.35,
+  HIT_LOW: 0.9, // capsule endpoints, measured up from the feet
+  HIT_HIGH: 2.8,
+  // How far back the server will rewind the world to judge a client's shot.
+  // Covers the client's own interpolation delay plus half its round trip.
+  LAG_COMP_MAX: 0.3,
+  // Bullet magnetism. A shot fired within this cone of an enemy is nudged onto
+  // them — enough to forgive a shaky reticle mid-swing, not enough to aim for
+  // you (it never leads a moving target).
+  AIM_ASSIST_ANGLE: 0.055, // ~3.2 degrees
+  AIM_ASSIST_RANGE: 130,
+  AIM_ASSIST_STRENGTH: 0.7,
   FIRE_COOLDOWN: 0.22,
   FLUID_MAX: 100,
   FLUID_PER_SHOT: 7,
@@ -58,6 +97,22 @@ export const COMBAT = {
   PROJECTILE_LIFE: 2.6,
   IMPACT_SLOW: 0.55, // hit players get briefly gunked up
   IMPACT_SLOW_TIME: 1.1,
+};
+
+// ------------------------------------------------------------------ bots
+// Bots shoot straight enough to be a threat and slowly enough to be beaten.
+// Reliable hit detection made them far deadlier than the numbers suggest, so
+// the restraint lives here rather than in their aim.
+export const BOT = {
+  RANGE: 78, // will not open fire beyond this
+  FIRE_GAP: 0.6, // minimum seconds between a bot's shots
+  FIRE_JITTER: 0.5, // plus up to this much, so a lobby never fires in unison
+  REACTION: 0.45, // pause after acquiring a new target
+  SPREAD: 0.09, // radians, before the distance term
+  SPREAD_FALLOFF: 600,
+  AIM_MIN: 0.7, // per-bot spread multiplier: some are sharp, some are not
+  AIM_MAX: 1.7,
+  LEAD: 0.8, // how much of the true lead they work out
 };
 
 // ---------------------------------------------------------------- match

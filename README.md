@@ -48,8 +48,8 @@ without other humans.
 | `Space` | Jump — or wall-jump off a building, or cut loose from a swing with a boost |
 | **Left click** | Fire a web ball (damages enemies) |
 | **Right click (hold)** | Shoot a web line and swing. Release to let go and keep your momentum |
-| `W` / `C` while swinging | Reel the line in — shorter rope, faster arc |
-| `S` while swinging | Pay the line out |
+| `Shift` / `C` while swinging | Reel the line in — shorter rope, faster arc |
+| `Ctrl` / `X` while swinging | Pay the line out |
 | `E` | Web-zip: yank yourself straight to whatever the crosshair is on |
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
