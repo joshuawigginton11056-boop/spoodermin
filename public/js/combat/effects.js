@@ -6,6 +6,7 @@ import { COMBAT } from '/shared/constants.js';
 import { splatTexture, puffTexture } from '../util/textures.js';
 
 const _v = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -169,13 +170,22 @@ export class Effects {
 
   cutWeb() { this.localLine.hide(); }
 
-  miss() { /* reserved for a whiff sound; visual stays silent */ }
+  /**
+   * A web that found nothing to stick to. Puffing at whatever the crosshair
+   * was over makes the whiff legible — silence reads as "the button did not
+   * work" rather than "you missed".
+   */
+  miss(at) {
+    if (at) this.puff(at, 1.1, 0.28, 0xbcc6da);
+  }
 
   remoteLine(id, from, to) {
     let line = this.lines.get(id);
+    // Only players who are actually swinging get a rope; building one for
+    // everybody else put a dozen unused meshes in the scene.
+    if (!to) { if (line) line.hide(); return; }
     if (!line) { line = new WebLine(this.scene); this.lines.set(id, line); }
-    if (!to) line.hide();
-    else line.set(from, to, 1);
+    line.set(from, to, 1);
   }
 
   dropRemote(id) {
@@ -265,7 +275,7 @@ export class Effects {
       // Stretch the ball along its velocity so it reads as a fast blob.
       const sp = p.vel.length();
       _q.setFromUnitVectors(UP, _v.copy(p.vel).divideScalar(sp || 1));
-      _m.compose(p.pos, _q, new THREE.Vector3(1, 1 + Math.min(2.2, sp / 60), 1));
+      _m.compose(p.pos, _q, _v2.set(1, 1 + Math.min(2.2, sp / 60), 1));
       this.ballMesh.setMatrixAt(i, _m);
       i++;
       if (i >= this.ballMesh.instanceMatrix.count) break;

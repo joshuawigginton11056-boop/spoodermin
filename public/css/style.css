@@ -78,7 +78,6 @@ html, body {
   padding: 6px 16px;
   text-align: center;
   min-width: 92px;
-  backdrop-filter: blur(6px);
 }
 .pill b { display: block; font-size: 22px; line-height: 1; letter-spacing: 1px; }
 .pill small { display: block; font-size: 9px; opacity: .65; letter-spacing: 2px; margin-top: 3px; }
@@ -174,6 +173,25 @@ html, body {
 #toast.show { opacity: 1; }
 #toast small { display: block; font-size: 14px; letter-spacing: 2px; opacity: .8; color: #fff; }
 
+/* Losing pointer lock used to be announced on the connection line inside the
+   hidden main menu, i.e. nowhere. */
+#resume-hint {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translateX(-50%);
+  padding: 14px 30px;
+  border-radius: 14px;
+  background: rgba(12, 16, 30, 0.82);
+  border: 1px solid var(--stroke);
+  font-size: 22px;
+  font-weight: bold;
+  letter-spacing: 4px;
+  text-align: center;
+  text-shadow: 0 3px 14px rgba(0, 0, 0, .8);
+}
+#resume-hint small { display: block; font-size: 13px; letter-spacing: 2px; opacity: .75; margin-top: 5px; font-weight: normal; }
+
 #damage-vignette {
   position: absolute;
   inset: 0;
@@ -208,9 +226,14 @@ html, body {
   align-items: center;
   justify-content: center;
   background: radial-gradient(circle at 50% 30%, rgba(30, 44, 92, .82), rgba(6, 8, 16, .94));
-  backdrop-filter: blur(3px);
 }
+/* A blurred backdrop over a live WebGL canvas costs a full-screen readback
+   every frame, so it is only worn by the panels shown while the game is idle. */
+#menu, #results { backdrop-filter: blur(3px); }
 .overlay.passthrough { pointer-events: none; background: rgba(6, 8, 16, .6); }
+/* The lobby panel has nothing to click, and swallowing clicks meant losing
+   the mouse during the countdown left no way to get the controls back. */
+#deploy { pointer-events: none; }
 
 .panel {
   width: min(680px, 92vw);

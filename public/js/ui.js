@@ -42,12 +42,18 @@ export class UI {
       resultsBoard: $('results-board'),
       scoreBoard: $('score-board'),
       againBtn: $('again-btn'),
+      resume: $('resume-hint'),
     };
     this.mm = this.el.minimap.getContext('2d');
     this.toastTimer = 0;
     this.hurtTimer = 0;
     this.feedItems = [];
     this.myId = 0;
+    // The HUD is rewritten from the frame loop, so every setter here is
+    // guarded: touching textContent or innerHTML sixty times a second for
+    // values that did not change is a surprising amount of layout work.
+    this.last = {};
+    this.mmNext = 0;
 
     try { this.el.nameInput.value = localStorage.getItem('spoodermin.name') || ''; } catch { /* sandboxed iframe */ }
   }
@@ -69,51 +75,75 @@ export class UI {
     $('fatal-text').textContent = text;
   }
 
+  /** Writes `value` to a HUD node only when it actually differs. */
+  _set(key, node, value) {
+    if (this.last[key] === value) return;
+    this.last[key] = value;
+    node.textContent = value;
+  }
+
   // ----------------------------------------------------------------- HUD
   setHealth(hp) {
-    const f = Math.max(0, Math.min(1, hp / 100));
-    this.el.healthFill.style.transform = `scaleX(${f})`;
-    this.el.healthText.textContent = Math.ceil(Math.max(0, hp));
+    const shown = Math.ceil(Math.max(0, hp));
+    if (this.last.hp !== shown) {
+      this.last.hp = shown;
+      this.el.healthFill.style.transform = `scaleX(${Math.max(0, Math.min(1, hp / 100))})`;
+      this.el.healthText.textContent = shown;
+    }
   }
 
   setFluid(v) {
-    this.el.fluidFill.style.transform = `scaleX(${Math.max(0, Math.min(1, v / 100))})`;
+    const shown = Math.round(Math.max(0, Math.min(100, v)));
+    if (this.last.fluid === shown) return;
+    this.last.fluid = shown;
+    this.el.fluidFill.style.transform = `scaleX(${shown / 100})`;
   }
 
   setSpeed(v) {
-    this.el.speed.textContent = Math.round(v * 3.6);
+    this._set('speed', this.el.speed, Math.round(v * 3.6));
   }
 
   setCounts(alive, kills) {
-    this.el.alive.textContent = alive;
-    this.el.kills.textContent = kills;
+    this._set('alive', this.el.alive, alive);
+    this._set('kills', this.el.kills, kills);
   }
 
   setCanWeb(can) {
     this.el.crosshair.classList.toggle('can-web', !!can);
   }
 
+
+  /** "Click to take back the mouse" — shown whenever the controls are idle. */
+  setPaused(on) {
+    if (this.last.paused === !!on) return;
+    this.last.paused = !!on;
+    this.el.resume?.classList.toggle('hidden', !on);
+  }
+
   setPhase(phase, timer, storm) {
     const el = this.el;
+    let main;
+    let sub;
+    let danger = false;
     if (phase === PHASE.PLAYING && storm) {
       if (storm.mode === 'shrink') {
-        el.phaseText.textContent = 'CLOSING';
-        el.phaseSub.textContent = `ZONE ${storm.phase}/${storm.total}`;
-        el.phasePill.classList.add('danger');
+        main = 'CLOSING';
+        sub = `ZONE ${storm.phase}/${storm.total}`;
+        danger = true;
       } else {
-        el.phaseText.textContent = fmt(storm.left);
-        el.phaseSub.textContent = `ZONE ${storm.phase + 1} IN`;
-        el.phasePill.classList.remove('danger');
+        main = fmt(storm.left);
+        sub = `ZONE ${storm.phase + 1} IN`;
       }
     } else if (phase === PHASE.COUNTDOWN) {
-      el.phaseText.textContent = fmt(timer);
-      el.phaseSub.textContent = 'DROPPING';
-      el.phasePill.classList.remove('danger');
+      main = fmt(timer);
+      sub = 'DROPPING';
     } else {
-      el.phaseText.textContent = 'LOBBY';
-      el.phaseSub.textContent = fmt(timer);
-      el.phasePill.classList.remove('danger');
+      main = 'LOBBY';
+      sub = fmt(timer);
     }
+    this._set('phaseText', el.phaseText, main);
+    this._set('phaseSub', el.phaseSub, sub);
+    el.phasePill.classList.toggle('danger', danger);
   }
 
   toast(main, sub = '', seconds = 2.2) {
@@ -170,15 +200,19 @@ export class UI {
 
   // -------------------------------------------------------------- lobby
   setDeploy({ title, timer, sub, roster }) {
-    this.el.deployTitle.textContent = title;
-    this.el.deployTimer.textContent = timer;
-    this.el.deploySub.textContent = sub;
-    if (roster) {
-      this.el.roster.innerHTML = roster.map((p) => {
-        const c = hex(SKINS[p.skin % SKINS.length].primary);
-        return `<div class="chip ${p.bot ? 'bot' : ''}"><i style="background:${c}"></i>${esc(p.name)}${p.bot ? ' <small>AI</small>' : ''}</div>`;
-      }).join('');
-    }
+    this._set('deployTitle', this.el.deployTitle, title);
+    this._set('deployTimer', this.el.deployTimer, timer);
+    this._set('deploySub', this.el.deploySub, sub);
+    if (!roster) return;
+    // This runs every frame for the whole lobby; rebuilding the chip list each
+    // time tore down and re-created a dozen elements sixty times a second.
+    const sig = roster.map((p) => `${p.id}:${p.name}:${p.skin}:${p.bot ? 1 : 0}`).join('|');
+    if (sig === this.last.roster) return;
+    this.last.roster = sig;
+    this.el.roster.innerHTML = roster.map((p) => {
+      const c = hex(SKINS[p.skin % SKINS.length].primary);
+      return `<div class="chip ${p.bot ? 'bot' : ''}"><i style="background:${c}"></i>${esc(p.name)}${p.bot ? ' <small>AI</small>' : ''}</div>`;
+    }).join('');
   }
 
   // ---------------------------------------------------------- scoreboard
@@ -187,6 +221,11 @@ export class UI {
    *                        the fight, instead of final placements.
    */
   renderBoard(target, rows, live = false) {
+    // The live scoreboard is redrawn for as long as Tab is held down, so it
+    // gets the same treatment as the lobby roster.
+    const sig = `${live}|${this.myId}|${rows.map((r) => `${r.id}:${r.kills}:${r.alive ? 1 : 0}:${r.placement || 0}`).join(',')}`;
+    if (target._sig === sig) return;
+    target._sig = sig;
     const html = [
       `<div class="row"><span class="rank hdr">#</span><span class="who hdr">HERO</span><span class="num hdr">KOs</span><span class="num hdr">${live ? 'STATUS' : 'PLACE'}</span></div>`,
       ...rows.map((r, i) => {
@@ -216,7 +255,16 @@ export class UI {
   }
 
   // ------------------------------------------------------------- minimap
+  /**
+   * The radar is a canvas redraw of a few hundred rectangles. At 20Hz it is
+   * indistinguishable from redrawing it every frame, and costs a third as much
+   * on a 60Hz display — more on a 144Hz one.
+   */
   drawMinimap({ me, storm, others, city, yaw }) {
+    const now = performance.now();
+    if (now < this.mmNext) return;
+    this.mmNext = now + 50;
+
     const g = this.mm;
     const W = this.el.minimap.width;
     const H = this.el.minimap.height;

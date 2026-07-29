@@ -32,38 +32,58 @@ export const PLAYER = {
 };
 
 // ---------------------------------------------------------------- camera
-// Third-person shoulder rig, Fortnite style: the camera sits behind and to the
-// right of the hero and points along the aim direction, so the body never sits
-// on top of the crosshair.
+// Third-person shoulder rig, Fortnite style. The arm still points along the
+// aim direction — that is what keeps the crosshair honest — but it is offset
+// to the right and slightly up so the hero sits low and left of centre instead
+// of squatting on top of the reticle.
 export const CAMERA = {
-  DISTANCE: [8.5, 12.5, 5.5], // cycled with V
   SHOULDER: 2.15, // offset to the camera's right
-  RISE: 0.5, // above eye height
+  RISE: 0.5, // pivot height above the eye
   MIN_DISTANCE: 2.4, // closest the collision spring arm may pull in
   HIDE_HERO: 3.6, // hide the model once the arm is shorter than this
   FOV: 66,
   FOV_SPEED_FROM: 20, // speed where the FOV starts to widen
   FOV_SPEED_GAIN: 0.34,
   FOV_SPEED_MAX: 13, // how much extra FOV top speed can buy
-  FOLLOW_HALFLIFE: 0.05, // position smoothing; rotation is never smoothed
-  PITCH_MIN: -1.15,
-  PITCH_MAX: 1.25,
-  SENSITIVITY: 0.0022,
 };
 
 // ---------------------------------------------------------------- webbing
 export const WEB = {
   MAX_LENGTH: 110, // how far a swing line can reach
-  MIN_LENGTH: 8,
-  REEL_SPEED: 10, // rope shortening while holding the reel key
-  SWING_ACCEL: 26, // player steering force mid-swing
-  RELEASE_BOOST: 1.03,
-  MAX_SPEED: 46, // arcs settle to this instead of compounding forever
-  DRAG: 5, // how quickly speed above MAX_SPEED bleeds off (1/s)
-  ROPE_CORRECT: 9, // 1/s — how fast rope stretch is eased away, not snapped
-  PUMP: 0.16, // per-second speed gain on the downswing
-  ATTACH_SLACK: 1.5, // rope starts this much longer than the anchor distance
-  LAUNCH_HOP: 7, // upward kick when starting a swing from a standstill
+  // Shortest the line can ever get. A rope of a few metres is a pirouette, not
+  // a swing — this is the floor that keeps arcs wide.
+  MIN_LENGTH: 18,
+  REEL_SPEED: 14, // rope shortening while holding C
+  // The line hauls itself in on the way down through an arc, the way you pump
+  // a swing by standing up at the bottom, and eases off once you are rising so
+  // it never drags you up into the anchor. Nothing to hold.
+  AUTO_REEL: 11,
+  // ...but only down to this share of the line you fired, never past the
+  // absolute floor. Left to run all the way in, an automatic reel ends every
+  // swing on a short rope spinning fast — the exact thing that made swinging
+  // feel out of control — and a flat floor throws away the difference between
+  // a long arc off a tower and a short hop between shopfronts.
+  AUTO_REEL_KEEP: 0.72,
+  AUTO_REEL_MIN: 34,
+  SWING_ACCEL: 34, // player steering force mid-swing
+  // Gravity while hanging on a line. Walking gravity is 30 — three times
+  // Earth's — which is right for a punchy jump and completely wrong for an
+  // arc: it drops you out of every swing before it has finished. Lighter here
+  // is what turns a plummet into a glide, and it takes the top speed down with
+  // it, because a swing's speed is bought with height.
+  SWING_GRAVITY: 16,
+  // Drag along the arc, per second. A soft ceiling reads better than a clamp:
+  // speed settles at a cruise instead of pinning.
+  SWING_DRAG: 0.16,
+  // The bottom of an arc sits at (anchor height - rope length). Fire a long
+  // line at a low anchor and that lands under the pavement, which is why
+  // swings kept ending in a scrape along the street. The line quietly takes up
+  // slack until the arc clears this much ground.
+  GROUND_CLEARANCE: 13,
+  RELEASE_BOOST: 1.04,
+  // Letting go converts a slice of the swing into lift, so a release carries
+  // you up into the next arc rather than dumping you in the street.
+  RELEASE_LIFT: 11,
   ZIP_SPEED: 62, // web-zip pull speed
   ZIP_ARRIVE: 5,
 };
@@ -99,22 +119,6 @@ export const COMBAT = {
   IMPACT_SLOW_TIME: 1.1,
 };
 
-// ------------------------------------------------------------------ bots
-// Bots shoot straight enough to be a threat and slowly enough to be beaten.
-// Reliable hit detection made them far deadlier than the numbers suggest, so
-// the restraint lives here rather than in their aim.
-export const BOT = {
-  RANGE: 78, // will not open fire beyond this
-  FIRE_GAP: 0.6, // minimum seconds between a bot's shots
-  FIRE_JITTER: 0.5, // plus up to this much, so a lobby never fires in unison
-  REACTION: 0.45, // pause after acquiring a new target
-  SPREAD: 0.09, // radians, before the distance term
-  SPREAD_FALLOFF: 600,
-  AIM_MIN: 0.7, // per-bot spread multiplier: some are sharp, some are not
-  AIM_MAX: 1.7,
-  LEAD: 0.8, // how much of the true lead they work out
-};
-
 // ---------------------------------------------------------------- match
 export const MATCH = {
   MIN_PLAYERS: 2,
@@ -130,6 +134,10 @@ export const MATCH = {
 export const STORM = {
   DAMAGE_START: 2.5, // hp/sec outside the safe zone in phase 1
   DAMAGE_RAMP: 1.6, // added per phase
+  // Once the last phase is done the zone closes to nothing over this many
+  // seconds. Holding a small final ring forever only worked while everyone was
+  // shooting at each other; it leaves a match that can never end otherwise.
+  FINAL_COLLAPSE: 22,
   PHASES: [
     { hold: 35, shrink: 30, radius: 0.72 },
     { hold: 28, shrink: 26, radius: 0.5 },

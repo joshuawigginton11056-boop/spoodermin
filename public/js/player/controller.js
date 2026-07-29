@@ -1,5 +1,10 @@
 // Local player: movement, web-swinging, wall-crawling, zipping, aiming and the
 // third-person camera. This is where the game feel lives.
+//
+// The simulation is stepped at a bounded rate rather than once per rendered
+// frame: every rate in here is per-second, and no single step is allowed to be
+// long enough for the pendulum to overshoot or for a fast release to pass
+// through a wall. A swing therefore traces the same arc at 30fps and at 144fps.
 
 import * as THREE from 'three';
 import { PLAYER, GRAVITY, WEB, COMBAT, CITY, CAMERA } from '/shared/constants.js';
@@ -7,19 +12,54 @@ import { Hero } from '../entities/hero.js';
 
 export const STATE = { IDLE: 0, RUN: 1, AIR: 2, SWING: 3, CLING: 4, ZIP: 5 };
 
-// Offsets for the spring-arm probes, in the camera's right/up axes. Five rays
-// instead of one stop the arm from slicing through corners and railings.
-const ARM_PROBES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55]];
+const CAM_DISTANCES = [9.5, 14, 6];
+// Longest physics step. Anything above this and the rope constraint starts to
+// visibly overshoot, which is what made fast swings feel like they stuttered.
+const MAX_SUBSTEP = 1 / 90;
+const MAX_SUBSTEPS = 8;
+// Tangential speed-up per second of swinging, replacing a per-frame multiplier
+// that used to hand out more speed the higher your frame rate was. Kept gentle:
+// a pendulum already converts height into speed, and stacking a fat multiplier
+// on top of that is what turned a glide into a 300km/h slingshot.
+const SWING_PUMP = 1.07;
+// Cruising ceiling. Sprinting is 21m/s, so this still reads as flying.
+const SWING_MAX_SPEED = 46;
+// How much of the outward velocity a taut line takes away in one step. A hair
+// under one gives the rope a little give, so catching a line halfway through a
+// fall lands as a firm tug over two or three frames instead of a single jolt.
+const ROPE_BITE = 0.86;
+// Ceiling on the positional part of the constraint, so a step that starts
+// deeply overstretched cannot fire the player off the end of the line.
+const ROPE_MAX_PULL = 55;
+// The camera pull-in probes, as (sideways, vertical) offsets from the head.
+const CAM_PROBES = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.55], [0, -0.55]];
+// Aim-assist cone for finding a swing anchor: (extra pitch, yaw offset) pairs.
+const ANCHOR_CONE = [];
+for (const up of [0, 0.35, 0.6, 0.9, 1.3]) {
+  for (const side of [0, 0.25, -0.25, 0.5, -0.5, 0.8, -0.8]) ANCHOR_CONE.push([up, side]);
+}
+// What makes a line worth swinging on. Anchoring to the wall at head height
+// gives a five-metre rope and a violent little pirouette at street level —
+// technically a swing, but it is where "too fast and going nowhere" came from.
+const ANCHOR_MIN_RISE = 12; // the anchor has to be properly overhead
+const ANCHOR_MIN_DIST = 26; // and far enough away to arc on
+// A deliberately aimed shot only has to clear your own arm's length.
+const ANCHOR_MIN_DIRECT = 5;
+// Relaxed pass, used only when the good kind of anchor is nowhere to be found,
+// so the web still fires rather than failing silently.
+const ANCHOR_FALLBACK_RISE = 4;
+const ANCHOR_FALLBACK_DIST = 12;
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
-const _pivot = new THREE.Vector3();
-const _back = new THREE.Vector3();
-const _right = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
+const _v5 = new THREE.Vector3();
+const _aim = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const _probe = new THREE.Vector3();
-const _look = new THREE.Vector3();
+const _euler = new THREE.Euler();
+const UP = new THREE.Vector3(0, 1, 0);
 
 export class LocalPlayer {
   constructor({ scene, camera, world, input, skin, onShoot, onZip, fx, targets }) {
@@ -56,6 +96,7 @@ export class LocalPlayer {
     // swing state
     this.anchor = null; // THREE.Vector3
     this.ropeLen = 0;
+    this.ropeLen0 = 0;
     this.swingSide = 1;
     this.swingTime = 0;
     this.zipTarget = null;
@@ -64,13 +105,11 @@ export class LocalPlayer {
 
     this.camDist = 0;
     this.camPos = new THREE.Vector3(0, 70, 20);
-    this.camEye = new THREE.Vector3(0, 70, 20); // camera position before shake
-    this.camLook = new THREE.Vector3();
     this.fov = CAMERA.FOV;
     this.shake = 0;
 
     this.aimPoint = new THREE.Vector3();
-    this.aimDist = 400;
+    this.aimDist = Infinity;
     this.canWeb = false;
   }
 
@@ -86,9 +125,9 @@ export class LocalPlayer {
     this.health = COMBAT.MAX_HEALTH;
     this.fluid = COMBAT.FLUID_MAX;
     this.hero.root.visible = true;
-    this.camPos.copy(this.pos).add(new THREE.Vector3(0, 6, 12));
-    this.camEye.copy(this.camPos);
-    this.updateAim(); // so a shot on the very first frame has somewhere to go
+    this.camPos.copy(this.pos);
+    this.camPos.y += 6;
+    this.camPos.z += 12;
   }
 
   die() {
@@ -103,10 +142,10 @@ export class LocalPlayer {
   get speed() { return Math.hypot(this.vel.x, this.vel.z); }
 
   // -------------------------------------------------------------- aiming
-  // Analytic look direction. The camera is built from yaw/pitch and points
-  // along exactly this vector, so it is the ray under the crosshair — and it
-  // stays correct on the frames where the arm is still easing into place or
-  // has been pushed in by a wall.
+  // Analytic look direction, and the camera is oriented straight from the same
+  // yaw and pitch, so this is exactly the camera's forward vector — the middle
+  // of the screen — on every frame, including the ones where the camera's
+  // position is still easing into place or has been pushed in by a wall.
   lookDir(out = _v) {
     return out.set(
       -Math.sin(this.yaw) * Math.cos(this.pitch),
@@ -115,22 +154,26 @@ export class LocalPlayer {
     ).normalize();
   }
 
-  /** Eye position — where webs are shot from. */
+  /** Eye position used as the origin for every aiming ray. */
   eye(out = _v2) {
     return out.set(this.pos.x, this.pos.y + PLAYER.EYE, this.pos.z);
   }
 
+  /** Direction from the hero's own eye to whatever the crosshair is sitting on. */
+  aimRayDir(out = _v3) {
+    return out.copy(this.aimPoint).sub(this.eye(_v2)).normalize();
+  }
+
   /**
    * Closest enemy inside the magnetism cone with a clear line to them.
-   * Returns {dir, dist, angle} or null. Never leads a target: this forgives a
-   * reticle that is slightly off, it does not do the aiming.
+   * Returns {dir, dist, angle} or null.
    */
   assistTarget(from, dir) {
     let best = null;
     let bestAngle = COMBAT.AIM_ASSIST_ANGLE;
     for (const t of this.targets()) {
       if (!t.alive) continue;
-      const to = _v3.copy(t.pos);
+      const to = _aim.copy(t.pos);
       to.y += PLAYER.HEIGHT * 0.55;
       to.sub(from);
       const d = to.length();
@@ -145,28 +188,6 @@ export class LocalPlayer {
       best = { dir: to.clone(), dist: d, angle };
     }
     return best;
-  }
-
-  /**
-   * Where the crosshair is pointing, in the world. The ray starts at the
-   * camera — with an over-the-shoulder rig the camera and the hero's eye see
-   * different things, and the crosshair belongs to the camera.
-   */
-  updateAim() {
-    const dir = this.lookDir(_look).clone();
-    const from = this.camEye;
-    const hit = this.world.raycast(from, dir, 400);
-    let dist = hit ? hit.dist : 400;
-
-    const target = this.assistTarget(from, dir);
-    if (target && target.dist < dist + 2) {
-      // Ease off the nudge as the reticle drifts to the edge of the cone.
-      const w = COMBAT.AIM_ASSIST_STRENGTH * (1 - target.angle / COMBAT.AIM_ASSIST_ANGLE);
-      dir.lerp(target.dir, w).normalize();
-      dist = target.dist;
-    }
-    this.aimPoint.copy(from).addScaledVector(dir, dist);
-    this.aimDist = dist;
   }
 
   /**
@@ -185,56 +206,127 @@ export class LocalPlayer {
     return out.normalize();
   }
 
-  // ------------------------------------------------------------- webbing
-  findAnchor() {
-    const from = this.eye(_v2).clone();
-    const dir = this.lookDir(_v3).clone();
-    let hit = this.world.raycast(from, dir, WEB.MAX_LENGTH * 1.3);
-    if (hit && hit.point.y > this.pos.y + 1.5 && hit.normal.y < 0.85) return hit.point.clone();
+  updateAim() {
+    // The crosshair is fixed in the middle of the screen, so the ray that
+    // decides what it is on has to leave the camera along the camera's own
+    // forward vector. Casting it from the hero's eye instead is what put the
+    // two out of step: the camera sits nine metres back, so the same direction
+    // from the two origins lands on different things.
+    const dir = this.lookDir(_v3);
+    const from = _v4.copy(this.camera.position);
+    const hit = this.world.raycast(from, dir, 500);
+    let dist = hit ? hit.dist : 500;
 
-    // Aim assist: sweep a cone up and around the look direction so a casual
-    // flick still finds a corner to swing from.
-    const base = dir.clone();
-    for (const up of [0.35, 0.6, 0.9, 1.3]) {
-      for (const side of [0, 0.25, -0.25, 0.5, -0.5]) {
-        const d = base.clone();
-        d.y += up;
-        d.applyAxisAngle(new THREE.Vector3(0, 1, 0), side);
-        d.normalize();
-        hit = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.25);
-        if (hit && hit.point.y > this.pos.y + 6 && hit.normal.y < 0.9) return hit.point.clone();
-      }
+    // Bullet magnetism. Web balls take a third of a second to cross a street,
+    // so the crosshair is rarely dead on a hero who is swinging; this forgives
+    // the last couple of degrees. It never leads a target — the lead is still
+    // entirely yours to judge.
+    const target = this.assistTarget(from, dir);
+    if (target && target.dist < dist + 2) {
+      const w = COMBAT.AIM_ASSIST_STRENGTH * (1 - target.angle / COMBAT.AIM_ASSIST_ANGLE);
+      dir.lerp(target.dir, w).normalize();
+      dist = target.dist;
     }
-    return null;
+    this.aimPoint.copy(from).addScaledVector(dir, dist);
+    // Reach is still measured from the hero, who is the one throwing the web.
+    this.aimDist = this.aimPoint.distanceTo(this.eye(_v2));
+    // The crosshair's "you can swing from that" state falls out of the aim ray
+    // we already cast, instead of costing a second one every frame. Anything
+    // within reach counts now that the web goes wherever it is pointed.
+    this.canWeb = this.state === STATE.SWING ||
+      (this.aimDist >= ANCHOR_MIN_DIRECT && this.aimDist <= WEB.MAX_LENGTH);
+  }
+
+  // ------------------------------------------------------------- webbing
+  /**
+   * Sweeps a cone around the look direction and keeps the *best* anchor rather
+   * than the first one found. High and far beats near and low: that is the
+   * difference between arcing across a street and pirouetting around a doorway.
+   */
+  findAnchor() {
+    const from = this.eye(_v2);
+    const dir = this.aimRayDir(_v3);
+
+    // Whatever the crosshair is actually on wins, wherever it is — a ledge, a
+    // low wall, the underside of a highway. If you are pointing at something,
+    // that is where the web goes; the assist below is for when you are not
+    // pointing at anything in particular, not a second opinion on where you
+    // meant to shoot.
+    const direct = this.world.raycast(from, dir, WEB.MAX_LENGTH);
+    if (direct && direct.dist >= ANCHOR_MIN_DIRECT) return _v5.copy(direct.point);
+
+    let best = -Infinity;
+    let found = false;
+
+    const sweep = (minRise, minDist) => {
+      for (let i = -1; i < ANCHOR_CONE.length; i++) {
+        const d = _v4.copy(dir);
+        if (i >= 0) {
+          d.y += ANCHOR_CONE[i][0];
+          d.applyAxisAngle(UP, ANCHOR_CONE[i][1]);
+          d.normalize();
+        }
+        const h = this.world.raycast(from, d, WEB.MAX_LENGTH * 1.3);
+        if (!h) continue;
+        if (h.normal.y > 0.9) continue; // a floor is not something to hang from
+
+        // Run the line up the face to the roofline rather than sticking it
+        // wherever the ray happened to touch. Hitting a wall at chest height
+        // is what buried the whole game at street level: a low anchor is a
+        // short rope, and a short rope is a spin, not a swing.
+        const dx = h.point.x - this.pos.x;
+        const dz = h.point.z - this.pos.z;
+        const horiz = Math.hypot(dx, dz);
+        let y = h.point.y;
+        if (h.box) {
+          const reachUp = Math.sqrt(Math.max(0, WEB.MAX_LENGTH * WEB.MAX_LENGTH - horiz * horiz));
+          y = Math.min(h.box.y + h.box.hh - 0.6, this.pos.y + reachUp);
+          if (y < h.point.y) y = h.point.y;
+        }
+
+        const rise = y - this.pos.y;
+        const dist = Math.hypot(horiz, rise);
+        if (rise < minRise || dist < minDist) continue;
+        // Height matters more than reach — altitude is what the next swing
+        // spends, so a line that lifts you keeps the whole run going.
+        const score = rise * 1.6 + dist;
+        if (score > best) { best = score; _v5.set(h.point.x, y, h.point.z); found = true; }
+      }
+    };
+
+    sweep(ANCHOR_MIN_RISE, ANCHOR_MIN_DIST);
+    if (!found) sweep(ANCHOR_FALLBACK_RISE, ANCHOR_FALLBACK_DIST);
+    return found ? _v5 : null;
   }
 
   startSwing() {
     const a = this.findAnchor();
     if (!a) {
-      this.fx?.miss();
+      this.fx?.miss(this.aimPoint);
       return false;
     }
-    this.anchor = a;
-    // Attach with a little slack rather than pre-tensioned: the line catches
-    // smoothly a moment later instead of yanking on the frame it lands.
-    this.ropeLen = THREE.MathUtils.clamp(
-      this.pos.distanceTo(a) + WEB.ATTACH_SLACK, WEB.MIN_LENGTH, WEB.MAX_LENGTH
-    );
+    this.anchor = a.clone();
+    // Hang on exactly the length that was fired, so the line goes taut as the
+    // arc reaches it instead of pre-tensioned and yanking on contact.
+    this.ropeLen = THREE.MathUtils.clamp(this.pos.distanceTo(this.anchor), WEB.MIN_LENGTH, WEB.MAX_LENGTH);
+    // Remembered so the automatic reel can pull in a share of *this* line
+    // rather than towards one fixed length for every swing.
+    this.ropeLen0 = this.ropeLen;
     this.state = STATE.SWING;
     this.swingTime = 0;
     // Launching from a standstill: give a hop so the line actually lifts you
     // off the roof instead of instantly going slack.
     if (this.grounded) {
-      this.vel.y = Math.max(this.vel.y, WEB.LAUNCH_HOP);
+      this.vel.y = Math.max(this.vel.y, 10);
       this.pos.y += 0.1;
     }
     this.grounded = false;
     // Shoot the line from whichever hand is closer to the anchor.
-    const rel = _v.copy(a).sub(this.pos);
+    const rel = _v.copy(this.anchor).sub(this.pos);
     const right = _v2.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     this.swingSide = rel.dot(right) >= 0 ? 1 : -1;
     this.hero.triggerShoot(this.swingSide);
-    this.fx?.webLine(this.hero.handWorld(this.swingSide, new THREE.Vector3()), a);
+    this.fx?.webLine(this.hero.handWorld(this.swingSide, _v3), this.anchor);
     return true;
   }
 
@@ -243,7 +335,11 @@ export class LocalPlayer {
     this.anchor = null;
     if (boost) {
       this.vel.multiplyScalar(WEB.RELEASE_BOOST);
-      this.vel.y += 1.5;
+      // Lift scaled by how fast the arc was going, so a good swing throws you
+      // upward into the next one. A flat nudge was worth nothing against a
+      // gravity of 30 and left every release sinking towards the street.
+      const hs = Math.hypot(this.vel.x, this.vel.z);
+      this.vel.y += Math.min(WEB.RELEASE_LIFT, 2 + hs * 0.32);
     }
     this.state = STATE.AIR;
     this.fx?.cutWeb();
@@ -251,12 +347,9 @@ export class LocalPlayer {
 
   tryZip() {
     if (this.fluid < COMBAT.FLUID_PER_ZIP) return;
-    // Zip exactly where the crosshair is, which with a shoulder camera is not
-    // quite where the eye is looking.
-    const from = this.eye(_v2).clone();
-    const dir = _v3.copy(this.aimPoint).sub(from).normalize().clone();
-    const hit = this.world.raycast(from, dir, WEB.MAX_LENGTH * 1.6);
-    if (!hit) { this.fx?.miss(); return; }
+    const dir = this.aimRayDir(_v3);
+    const hit = this.world.raycast(this.eye(_v2), dir, WEB.MAX_LENGTH * 1.6);
+    if (!hit) { this.fx?.miss(this.aimPoint); return; }
     this.fluid -= COMBAT.FLUID_PER_ZIP;
     this.zipTarget = hit.point.clone().addScaledVector(hit.normal, 1.2);
     this.zipTime = 2.2;
@@ -264,7 +357,7 @@ export class LocalPlayer {
     this.anchor = null;
     this.swingSide = 1;
     this.hero.triggerShoot(1);
-    this.fx?.webLine(this.hero.handWorld(1, new THREE.Vector3()), this.zipTarget);
+    this.fx?.webLine(this.hero.handWorld(1, _v4), this.zipTarget);
     this.onZip?.();
   }
 
@@ -283,21 +376,32 @@ export class LocalPlayer {
   }
 
   // ------------------------------------------------------------- the loop
+  /**
+   * One rendered frame: read input once, then advance the simulation in
+   * however many bounded steps `dt` is worth.
+   */
   update(dt) {
     const input = this.input;
     const m = input.mouse;
 
     // ---- look
     // Positive pitch parks the camera above the hero, i.e. looking down.
-    this.yaw -= m.dx * CAMERA.SENSITIVITY;
-    this.pitch += m.dy * CAMERA.SENSITIVITY;
-    this.pitch = THREE.MathUtils.clamp(this.pitch, CAMERA.PITCH_MIN, CAMERA.PITCH_MAX);
-    if (input.hit('KeyV')) this.camDist = (this.camDist + 1) % CAMERA.DISTANCE.length;
+    const sens = 0.0022;
+    this.yaw -= m.dx * sens;
+    this.pitch += m.dy * sens;
+    this.pitch = THREE.MathUtils.clamp(this.pitch, -1.15, 1.25);
+    if (input.hit('KeyV')) this.camDist = (this.camDist + 1) % CAM_DISTANCES.length;
 
     if (!this.alive) {
       this.updateCamera(dt, true);
       return;
     }
+
+    // Resolve the crosshair before anything reads it, so a web fired this
+    // frame goes where the crosshair is now rather than where it was last
+    // frame. It is resolved again at the end, once the camera has moved, for
+    // the reticle to be drawn against.
+    this.updateAim();
 
     this.cooldown -= dt;
     this.fluid = Math.min(COMBAT.FLUID_MAX, this.fluid + COMBAT.FLUID_REGEN * dt);
@@ -319,16 +423,28 @@ export class LocalPlayer {
     const sprint = input.down('ShiftLeft') || input.down('ShiftRight');
     const maxSpeed = (sprint ? PLAYER.SPRINT : PLAYER.WALK) * (slowed ? COMBAT.IMPACT_SLOW : 1);
 
-    // ---- actions
+    // ---- actions (edge-triggered, so exactly once per frame)
     if (m.leftEdge || (m.left && this.cooldown <= 0)) this.shoot();
     if (input.hit('KeyE')) this.tryZip();
     if (input.hit('Space')) this.jumpBuffer = 0.16;
-    this.jumpBuffer -= dt;
 
     if (m.rightEdge && this.state !== STATE.SWING) this.startSwing();
     if (!m.right && this.state === STATE.SWING) this.endSwing(true);
 
-    // ---- per-state simulation
+    // ---- simulate
+    const steps = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(dt / MAX_SUBSTEP)));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) this.simulate(h, wx, wz, wishing, maxSpeed);
+
+    this.updateHero(dt);
+    this.updateCamera(dt, false);
+    this.updateAim();
+  }
+
+  /** One bounded physics step. */
+  simulate(dt, wx, wz, wishing, maxSpeed) {
+    this.jumpBuffer -= dt;
+
     switch (this.state) {
       case STATE.ZIP: this.stepZip(dt); break;
       case STATE.SWING: this.stepSwing(dt, wx, wz); break;
@@ -403,16 +519,6 @@ export class LocalPlayer {
     const lim = CITY.HALF + 90;
     this.pos.x = THREE.MathUtils.clamp(this.pos.x, -lim, lim);
     this.pos.z = THREE.MathUtils.clamp(this.pos.z, -lim, lim);
-
-    this.updateHero(dt);
-    this.updateCamera(dt, false);
-    this.updateAim();
-
-    // Crosshair feedback: is there something swingable out there?
-    if (this.state !== STATE.SWING) {
-      const hit = this.world.raycast(this.eye(_v2).clone(), this.lookDir(_v3).clone(), WEB.MAX_LENGTH * 1.3);
-      this.canWeb = !!(hit && hit.point.y > this.pos.y + 1.5);
-    } else this.canWeb = true;
   }
 
   // ------------------------------------------------------------ movement
@@ -444,56 +550,70 @@ export class LocalPlayer {
   stepSwing(dt, wx, wz) {
     if (!this.anchor) { this.state = STATE.AIR; return; }
     this.swingTime += dt;
-    this.vel.y -= GRAVITY * dt;
+    this.vel.y -= WEB.SWING_GRAVITY * dt;
+
+    // The line reels itself in on the way down through the arc and lets be on
+    // the way up, so a swing pumps without anyone holding a key. It stops at
+    // AUTO_REEL_MIN — run all the way in and every swing finishes as a short,
+    // fast spin, which is the thing that made this feel out of control.
+    const reelFloor = Math.max(WEB.AUTO_REEL_MIN, this.ropeLen0 * WEB.AUTO_REEL_KEEP);
+    if (this.vel.y < 0 && this.ropeLen > reelFloor) {
+      this.ropeLen = Math.max(reelFloor, this.ropeLen - WEB.AUTO_REEL * dt);
+    }
+
+    // C hauls in harder than the automatic reel, and all the way down, for
+    // anyone who wants to whip round a corner or climb a face.
+    if (this.input.down('KeyC')) {
+      this.ropeLen = Math.max(WEB.MIN_LENGTH, this.ropeLen - WEB.REEL_SPEED * dt);
+    }
+
+    // Take up slack so the bottom of the arc stays above the street. Done as a
+    // steady reel rather than a clamp at fire time, so it reads as the line
+    // pulling tight through the swing instead of a yank the moment it sticks.
+    const safe = Math.max(WEB.MIN_LENGTH, this.anchor.y - WEB.GROUND_CLEARANCE);
+    if (this.ropeLen > safe) {
+      this.ropeLen = Math.max(safe, this.ropeLen - WEB.REEL_SPEED * 1.6 * dt);
+    }
 
     // Steering: push along the tangent of the arc.
     const rope = _v.copy(this.pos).sub(this.anchor);
-    const out = rope.divideScalar(rope.length() || 1e-4); // unit, anchor -> hero
+    const dist = rope.length() || 1;
+    rope.divideScalar(dist);
     if (wx || wz) {
       const wish = _v2.set(wx, 0, wz);
       // Remove the component pointing along the rope so we do not fight it.
-      wish.addScaledVector(out, -wish.dot(out));
+      wish.addScaledVector(rope, -wish.dot(rope));
       this.vel.addScaledVector(wish, WEB.SWING_ACCEL * dt);
     }
 
-    // Reel in for altitude / speed, pay out to drop. Deliberately not on W/S:
-    // those steer, and reeling in every time you held forward was most of why
-    // swings ran away with themselves.
-    if (this.input.down('KeyC') || this.input.down('ShiftLeft') || this.input.down('ShiftRight')) {
-      this.ropeLen = Math.max(WEB.MIN_LENGTH, this.ropeLen - WEB.REEL_SPEED * dt);
-    }
-    if (this.input.down('KeyX') || this.input.down('ControlLeft')) {
-      this.ropeLen = Math.min(WEB.MAX_LENGTH, this.ropeLen + WEB.REEL_SPEED * dt);
-    }
-
-    // Rope constraint, solved against the position we are about to move to so
-    // the line goes taut on the frame it would have overstretched.
+    // Rope constraint. The line is inextensible, so all that happens at full
+    // stretch is that the outward part of the velocity stops existing — the
+    // tangential part, steering included, is carried straight through. The old
+    // version rebuilt the whole velocity vector from a position delta, which
+    // both threw the steering away and turned every frame-time wobble into a
+    // visible kick.
     const next = _v3.copy(this.pos).addScaledVector(this.vel, dt).sub(this.anchor);
-    const d = next.length() || 1e-4;
+    const d = next.length();
     if (d > this.ropeLen) {
       const n = next.divideScalar(d);
-      // Cancel only the outward component. The tangential speed that makes the
-      // arc feel good is left alone — rewriting the whole velocity vector every
-      // frame (the old behaviour) is what made swinging feel like a series of
-      // jerks, and made it framerate-dependent on top of that.
       const radial = this.vel.dot(n);
-      if (radial > 0) this.vel.addScaledVector(n, -radial);
-      // Whatever stretch is left bleeds off over a few frames rather than being
-      // teleported away in one.
-      const stretch = d - this.ropeLen;
-      this.pos.addScaledVector(n, -stretch * Math.min(1, WEB.ROPE_CORRECT * dt));
-      // A gentle pump on the downswing replaces the energy the taut line eats.
-      // Per second, not per frame: the old multiply fed a 144Hz display more
-      // than twice the speed it fed a 60Hz one.
-      if (this.vel.y < 0) this.vel.multiplyScalar(1 + WEB.PUMP * dt);
+      if (radial > 0) this.vel.addScaledVector(n, -radial * ROPE_BITE);
+      // Pull the overshoot out over this step rather than snapping. The
+      // overshoot scales with dt², so dividing by dt leaves a correction that
+      // behaves the same at any frame rate.
+      const pull = Math.min(((d - this.ropeLen) / dt) * 0.65, ROPE_MAX_PULL);
+      this.vel.addScaledVector(n, -pull);
+
+      // A swing that is already moving picks up a little energy, which is what
+      // makes long arcs feel powerful. Per second, not per frame.
+      const sp = this.vel.length();
+      if (sp > 1 && sp < SWING_MAX_SPEED) this.vel.multiplyScalar(Math.pow(SWING_PUMP, dt));
     }
 
-    // Speed ceiling, eased in so touching it never pops.
+    // Soft ceiling, then a hard one as a backstop.
+    this.vel.multiplyScalar(Math.max(0, 1 - WEB.SWING_DRAG * dt));
     const sp = this.vel.length();
-    if (sp > WEB.MAX_SPEED) {
-      const k = Math.min(1, WEB.DRAG * dt);
-      this.vel.multiplyScalar(1 - k + k * (WEB.MAX_SPEED / sp));
-    }
+    if (sp > SWING_MAX_SPEED) this.vel.multiplyScalar(SWING_MAX_SPEED / sp);
 
     // Bail out if the rope goes slack behind us near the ground.
     if (this.anchor.y < this.pos.y + 1 && this.grounded) this.endSwing(false);
@@ -555,9 +675,9 @@ export class LocalPlayer {
 
     let anchorLocal = null;
     if (this.anchor) {
-      anchorLocal = h.root.worldToLocal(_v.copy(this.anchor)).clone();
+      anchorLocal = h.root.worldToLocal(_v.copy(this.anchor));
     } else if (this.zipTarget) {
-      anchorLocal = h.root.worldToLocal(_v.copy(this.zipTarget)).clone();
+      anchorLocal = h.root.worldToLocal(_v.copy(this.zipTarget));
     }
 
     h.update(dt, {
@@ -570,58 +690,57 @@ export class LocalPlayer {
     });
   }
 
-  /**
-   * Over-the-shoulder third-person rig, Fortnite style.
-   *
-   * The camera hangs off a spring arm behind the hero and is then pushed to the
-   * right and slightly up, and it points along the aim direction rather than
-   * back at the hero. That is the whole trick: the body sits low and left of
-   * centre, the crosshair looks down a clear lane, and turning the camera does
-   * not swing the character across the screen.
-   */
   updateCamera(dt, dead) {
-    const arm = CAMERA.DISTANCE[this.camDist];
-    _pivot.copy(this.pos);
-    _pivot.y += PLAYER.EYE + CAMERA.RISE;
+    const arm = CAM_DISTANCES[this.camDist];
+    // Pivot sits a little above the eye; the arm hangs off it and is then
+    // pushed out to the right, which is what puts the hero low and left of the
+    // crosshair rather than directly under it.
+    const pivot = _v.copy(this.pos);
+    pivot.y += PLAYER.EYE + CAMERA.RISE;
 
-    // Camera basis from yaw/pitch. `back` runs from the pivot out to the camera.
-    const cp = Math.cos(this.pitch);
-    _back.set(Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp);
+    const dir = _v2.set(
+      Math.sin(this.yaw) * Math.cos(this.pitch),
+      Math.sin(this.pitch),
+      Math.cos(this.yaw) * Math.cos(this.pitch)
+    );
+
     // Kept level rather than rolled with pitch, so the shoulder offset does not
     // slide across the screen as you look up and down.
-    _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const side = _v3.set(dir.z, 0, -dir.x).normalize();
+    const off = _off.copy(dir).multiplyScalar(arm).addScaledVector(side, CAMERA.SHOULDER);
+    const reach = off.length() || 1e-4;
+    const probeDir = _probe.copy(off).divideScalar(reach);
 
-    _off.copy(_back).multiplyScalar(arm).addScaledVector(_right, CAMERA.SHOULDER);
-    const reach = _off.length() || 1e-4;
-    _v3.copy(_off).divideScalar(reach); // spring-arm direction
-
-    // Pull the whole arm in if a building is in the way — shoulder offset
-    // included, otherwise the camera clips walls on its right.
+    // Pull the camera in if a building is in the way. A few offset probes
+    // around the centre ray stop the camera from slicing through corners. The
+    // whole arm is scaled, shoulder included, or the camera clips walls on its
+    // right while the centre ray still reports clear.
     let allowed = reach;
-    for (const [su, sv] of ARM_PROBES) {
-      _probe.copy(_pivot).addScaledVector(_right, su);
-      _probe.y += sv;
-      const hit = this.world.raycast(_probe, _v3, reach + 1.4);
+    const from = _v4;
+    for (const [su, sv] of CAM_PROBES) {
+      from.copy(pivot).addScaledVector(side, su);
+      from.y += sv;
+      const hit = this.world.raycast(from, probeDir, reach + 1.4);
       if (hit) allowed = Math.min(allowed, Math.max(CAMERA.MIN_DISTANCE, hit.dist - 1.1));
     }
-    if (allowed < reach) _off.multiplyScalar(allowed / reach);
+    if (allowed < reach) off.multiplyScalar(allowed / reach);
     // Once the camera is right on top of the hero, hide the model so the view
     // is not filled with the inside of a shoulder.
     this.hero.root.visible = this.alive && allowed > CAMERA.HIDE_HERO;
 
-    const want = _v2.copy(_pivot).add(_off);
-    // Position is smoothed, rotation never is: a shoulder camera that lags the
-    // mouse feels broken, while a little positional give hides physics noise.
-    const k = 1 - Math.pow(2, -dt / CAMERA.FOLLOW_HALFLIFE);
+    const want = _v5.copy(pivot).add(off);
+    const k = 1 - Math.pow(0.0008, dt);
     this.camPos.lerp(want, dead ? k * 0.5 : k);
-    this.camEye.copy(this.camPos);
     this.camera.position.copy(this.camPos);
 
-    // Look along the aim direction, not at the hero. The camera's forward
-    // vector is then exactly the analytic look direction, so the crosshair and
-    // the aim ray agree to the pixel.
-    this.camLook.copy(this.camPos).add(this.lookDir(_look));
-    this.camera.lookAt(this.camLook);
+    // Orientation comes straight from yaw and pitch, so the camera's forward
+    // vector *is* the look direction and the middle of the screen is exactly
+    // where you are aiming — no easing between the two, which is what lets the
+    // crosshair sit still in the centre and still tell the truth. Only the
+    // camera's position eases; pointing it back at the hero's head instead let
+    // the two drift apart every time you turned.
+    _euler.set(-this.pitch, this.yaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(_euler);
 
     // Speed FOV + a touch of shake. Kept subtle — a FOV that breathes hard on
     // every swing reads as the world lurching rather than as speed.
@@ -629,7 +748,10 @@ export class LocalPlayer {
       (this.speed - CAMERA.FOV_SPEED_FROM) * CAMERA.FOV_SPEED_GAIN, 0, CAMERA.FOV_SPEED_MAX
     );
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 3);
-    this.camera.fov = this.fov;
+    if (Math.abs(this.camera.fov - this.fov) > 0.01) {
+      this.camera.fov = this.fov;
+      this.camera.updateProjectionMatrix();
+    }
     if (this.shake > 0.001) {
       this.shake *= Math.pow(0.02, dt);
       const s = this.shake;
@@ -637,7 +759,12 @@ export class LocalPlayer {
       this.camera.position.y += (Math.random() - 0.5) * s;
       this.camera.position.z += (Math.random() - 0.5) * s;
     }
-    this.camera.updateProjectionMatrix();
+
+    // three only refreshes these inside render(). Aiming through a screen
+    // pixel has to unproject against the camera as it is right now, or the
+    // crosshair reports where you were pointing a frame ago.
+    this.camera.updateMatrixWorld();
+    this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
   }
 
   netState() {

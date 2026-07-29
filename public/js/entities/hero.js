@@ -58,7 +58,20 @@ export class Hero {
     this.shootTimer = 0;
     this.shootArm = 1; // 1 = right
     this.blend = { run: 0, air: 0, swing: 0, cling: 0 };
+    this.shadowMeshes = [];
+    this._casting = true;
     this.build();
+  }
+
+  /**
+   * Whether this hero is drawn into the shadow map. Sixteen figures made of
+   * nineteen pieces each is the bulk of the shadow pass, and a rival's shadow
+   * is not worth much once they are a block away.
+   */
+  setShadowCasting(on) {
+    if (this._casting === on) return;
+    this._casting = on;
+    for (const m of this.shadowMeshes) m.castShadow = on;
   }
 
   build() {
@@ -75,6 +88,7 @@ export class Hero {
       m.castShadow = true;
       m.receiveShadow = true;
       parent.add(m);
+      this.shadowMeshes.push(m);
       return m;
     };
 

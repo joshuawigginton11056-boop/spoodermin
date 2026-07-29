@@ -4,8 +4,13 @@
 // everything that matters: health, web projectiles and their hits, the storm,
 // eliminations and placements. Bots are simulated entirely here so a solo
 // player still gets a full battle royale lobby.
+//
+// Bots are non-combatants: they wander, they run from the storm, and they can
+// be webbed, but they never target anyone and never fire. That leaves the
+// storm as the only thing that can decide a match, so it closes to nothing
+// once the scripted phases run out.
 
-import { BOT, COMBAT, MATCH, PHASE, PLAYER, SKINS, HERO_NAMES, STORM, CITY } from '../shared/constants.js';
+import { COMBAT, MATCH, PHASE, PLAYER, SKINS, HERO_NAMES, STORM, CITY } from '../shared/constants.js';
 import { generateCity, raycastCity, aabbContains } from '../shared/citygen.js';
 
 const STATE = { IDLE: 0, RUN: 1, AIR: 2, SWING: 3, CLING: 4, ZIP: 5 };
@@ -15,8 +20,7 @@ let nextEntityId = 1;
 /**
  * Closest approach between two segments, p0->p1 and q0->q1.
  * Returns the squared distance and how far along the first segment it happens.
- * Used to test a web ball's path for the tick against a player's hit capsule:
- * sampling points instead lets fast shots step straight through a hero.
+ * Used to test a web ball's path for the tick against a player's hit capsule.
  */
 function segmentClosest(p0, p1, q0, q1) {
   const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
@@ -121,12 +125,8 @@ export class Room {
       slowUntil: 0,
       lastSeen: Date.now(),
       hist: [], // recent positions, for rewinding shots (see histPos)
-      // bot brain
-      bot: isBot ? {
-        target: null, think: 0, wander: [0, 0, 0], jumpAt: 0, strafe: 1,
-        nextShot: 0,
-        aim: BOT.AIM_MIN + Math.random() * (BOT.AIM_MAX - BOT.AIM_MIN),
-      } : null,
+      // bot brain — no target, because bots do not fight
+      bot: isBot ? { think: 0, wander: [0, 0, 0], jumpAt: 0 } : null,
     };
     this.players.set(id, p);
     return p;
@@ -214,6 +214,7 @@ export class Room {
       mode: 'hold',
       timeLeft: 12,
       damage: STORM.DAMAGE_START,
+      collapsing: false,
     };
     for (const p of this.players.values()) this.spawn(p);
     this.phase = PHASE.PLAYING;
@@ -271,7 +272,7 @@ export class Room {
       cx: +s.cx.toFixed(2), cz: +s.cz.toFixed(2),
       r: +s.radius.toFixed(2), tr: +s.targetRadius.toFixed(2),
       mode: s.mode, left: +s.timeLeft.toFixed(1), dmg: +s.damage.toFixed(1),
-      phase: s.phaseIndex + 1, total: STORM.PHASES.length,
+      phase: Math.min(s.phaseIndex + 1, STORM.PHASES.length), total: STORM.PHASES.length,
     };
   }
 
@@ -287,7 +288,7 @@ export class Room {
     if (s.timeLeft <= 0) {
       if (s.mode === 'hold') {
         const next = STORM.PHASES[s.phaseIndex + 1];
-        if (!next) { s.mode = 'final'; s.timeLeft = 9999; return; }
+        if (!next) { this.beginFinalCollapse(s); return; }
         s.mode = 'shrink';
         s.startRadius = s.radius;
         s.targetRadius = CITY.HALF * 1.12 * next.radius;
@@ -303,11 +304,31 @@ export class Room {
       } else if (s.mode === 'shrink') {
         s.radius = s.targetRadius;
         const next = STORM.PHASES[s.phaseIndex + 1];
+        // The last phase used to settle into a 9999-second hold, which is how a
+        // final circle nobody can be pushed out of lasts forever.
+        if (!next && !s.collapsing) { this.beginFinalCollapse(s); return; }
         s.mode = 'hold';
         s.timeLeft = next ? next.hold : 9999;
         this.broadcast({ t: 'storm', storm: this.stormPacket(), warn: 'stable' });
       }
     }
+  }
+
+  /**
+   * Closes the safe zone to nothing after the last scripted phase. With nobody
+   * shooting back, the storm is the only thing left that can decide a match, so
+   * it has to actually finish the job.
+   */
+  beginFinalCollapse(s) {
+    if (s.collapsing) return;
+    s.collapsing = true;
+    s.mode = 'shrink';
+    s.startRadius = s.radius;
+    s.targetRadius = 0;
+    s.timeLeft = STORM.FINAL_COLLAPSE;
+    s.shrinkTime = STORM.FINAL_COLLAPSE;
+    s.damage = STORM.DAMAGE_START + STORM.DAMAGE_RAMP * (STORM.PHASES.length + 1);
+    this.broadcast({ t: 'storm', storm: this.stormPacket(), warn: 'shrinking' });
   }
 
   // ------------------------------------------------------------- shooting
@@ -360,7 +381,7 @@ export class Room {
     p.fluid -= COMBAT.FLUID_PER_SHOT;
     // The ball is simulated `lag` seconds behind wall clock for its whole
     // flight, so every frame of it is tested against the world the shooter was
-    // looking at. Bots pass no rewind and so play against the live world.
+    // looking at.
     const lag = Math.min(COMBAT.LAG_COMP_MAX, Math.max(0, Number(rewind) || 0));
     const proj = {
       id: nextEntityId++,
@@ -401,7 +422,8 @@ export class Room {
         const nz = pr.pos[2] + pr.vel[2] * h;
 
         // Players first: sweep this substep's whole path against each hero's
-        // hit capsule, at the moment in time this ball is judging.
+        // hit capsule, at the moment in time this ball is judging. Sampling
+        // points instead let a 140m/s ball step clean through someone.
         from[0] = pr.pos[0]; from[1] = pr.pos[1]; from[2] = pr.pos[2];
         to[0] = nx; to[1] = ny; to[2] = nz;
         let victim = null;
@@ -481,68 +503,42 @@ export class Room {
     return hit ? hit.point[1] : 0;
   }
 
+  /** Somewhere inside the safe zone for a bot to head towards next. */
+  pickWander(b) {
+    const s = this.storm;
+    const ang = Math.random() * Math.PI * 2;
+    const rr = (s ? s.radius : CITY.HALF) * 0.75 * Math.random();
+    const cx = s ? s.cx : 0;
+    const cz = s ? s.cz : 0;
+    b.wander = [cx + Math.cos(ang) * rr, 0, cz + Math.sin(ang) * rr];
+  }
+
   updateBot(p, dt) {
     const b = p.bot;
     b.think -= dt;
     const s = this.storm;
 
-    if (b.think <= 0) {
-      b.think = 0.35 + Math.random() * 0.4;
-      // Pick the closest visible-ish enemy.
-      let best = null;
-      let bestD = 150;
-      for (const o of this.players.values()) {
-        if (o === p || !o.alive) continue;
-        const d = Math.hypot(o.pos[0] - p.pos[0], o.pos[1] - p.pos[1], o.pos[2] - p.pos[2]);
-        // Bots care much more about humans; keeps the action pointed at you.
-        const weight = o.isBot ? d * 1.5 : d * 0.7;
-        if (weight < bestD) { bestD = weight; best = o; }
-      }
-      const switched = b.target !== (best ? best.id : null);
-      b.target = best ? best.id : null;
-      // Give the player a beat to react when a bot swings its attention over.
-      if (switched && best) b.nextShot = Math.max(b.nextShot, this.now + BOT.REACTION);
-      b.strafe = Math.random() < 0.5 ? -1 : 1;
-      if (!best) {
-        const ang = Math.random() * Math.PI * 2;
-        const rr = s ? s.radius * 0.7 * Math.random() : 100;
-        b.wander = [s.cx + Math.cos(ang) * rr, 0, s.cz + Math.sin(ang) * rr];
-      }
-    }
-
-    // Where does it want to be?
-    let goal;
     const distToCentre = s ? Math.hypot(p.pos[0] - s.cx, p.pos[2] - s.cz) : 0;
     const outside = s && distToCentre > s.radius - 12;
-    const target = b.target ? this.players.get(b.target) : null;
-    if (outside) {
-      goal = [s.cx, 0, s.cz];
-    } else if (target && target.alive) {
-      goal = [target.pos[0], 0, target.pos[2]];
-    } else {
-      goal = b.wander;
+
+    // Bots do not fight. They wander the city and run for the safe zone; they
+    // never pick a target and never shoot, so the only things that can hurt a
+    // player are the storm and another human.
+    const arrived = Math.hypot(b.wander[0] - p.pos[0], b.wander[2] - p.pos[2]) < 8;
+    if (b.think <= 0 || arrived) {
+      b.think = 2.5 + Math.random() * 3;
+      this.pickWander(b);
     }
+
+    const goal = outside ? [s.cx, 0, s.cz] : b.wander;
 
     let gx = goal[0] - p.pos[0];
     let gz = goal[2] - p.pos[2];
     const gd = Math.hypot(gx, gz) || 1;
     gx /= gd; gz /= gd;
 
-    // Keep some distance when engaging so bots strafe instead of hugging.
-    let speed = PLAYER.WALK * (outside ? 1.35 : 1.0);
-    if (target && target.alive && !outside) {
-      const d = Math.hypot(target.pos[0] - p.pos[0], target.pos[2] - p.pos[2]);
-      if (d < 22) { gx = -gx; gz = -gz; }
-      // Orbit the target instead of walking straight at it.
-      const px = -gz * 0.65 * b.strafe;
-      const pz = gx * 0.65 * b.strafe;
-      gx += px; gz += pz;
-      const n = Math.hypot(gx, gz) || 1;
-      gx /= n; gz /= n;
-      p.yaw = Math.atan2(target.pos[0] - p.pos[0], target.pos[2] - p.pos[2]);
-    } else {
-      p.yaw = Math.atan2(gx, gz);
-    }
+    const speed = PLAYER.WALK * (outside ? 1.35 : 1.0);
+    p.yaw = Math.atan2(gx, gz);
 
     const slow = this.now < p.slowUntil ? COMBAT.IMPACT_SLOW : 1;
     p.vel[0] += gx * speed * slow * dt * 6;
@@ -588,35 +584,6 @@ export class Room {
 
     p.pos[0] = nx; p.pos[1] = ny; p.pos[2] = nz;
     p.state = !p.grounded ? STATE.AIR : (Math.hypot(p.vel[0], p.vel[2]) > 1.5 ? STATE.RUN : STATE.IDLE);
-
-    // Fire at the target if roughly lined up and nothing solid is in between.
-    if (target && target.alive && p.fluid > COMBAT.FLUID_PER_SHOT * 2 && this.now >= b.nextShot) {
-      const eye = [p.pos[0], p.pos[1] + PLAYER.EYE * 0.8, p.pos[2]];
-      const tc = [target.pos[0], target.pos[1] + PLAYER.HEIGHT * 0.55, target.pos[2]];
-      const dx = tc[0] - eye[0], dy = tc[1] - eye[1], dz = tc[2] - eye[2];
-      const dist = Math.hypot(dx, dy, dz);
-      if (dist < BOT.RANGE) {
-        const dir = [dx / dist, dy / dist, dz / dist];
-        const hit = raycastCity(this.city.colliders, eye, dir, dist);
-        if (!hit) {
-          // Lead the shot and add a miss cone so bots are beatable.
-          const flight = dist / COMBAT.SHOT_SPEED;
-          const lead = [
-            tc[0] + target.vel[0] * flight * BOT.LEAD,
-            tc[1] + target.vel[1] * flight * 0.5 + COMBAT.SHOT_GRAVITY * flight * flight * 0.5,
-            tc[2] + target.vel[2] * flight * BOT.LEAD,
-          ];
-          let ax = lead[0] - eye[0], ay = lead[1] - eye[1], az = lead[2] - eye[2];
-          const al = Math.hypot(ax, ay, az) || 1;
-          const spread = (BOT.SPREAD + dist / BOT.SPREAD_FALLOFF) * b.aim;
-          ax = ax / al + (Math.random() - 0.5) * spread;
-          ay = ay / al + (Math.random() - 0.5) * spread;
-          az = az / al + (Math.random() - 0.5) * spread;
-          this.handleShoot(p, eye, [ax, ay, az]);
-          b.nextShot = this.now + BOT.FIRE_GAP + Math.random() * BOT.FIRE_JITTER;
-        }
-      }
-    }
   }
 
   // ------------------------------------------------------------------ loop

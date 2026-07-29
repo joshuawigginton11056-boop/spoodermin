@@ -48,16 +48,24 @@ without other humans.
 | `Space` | Jump — or wall-jump off a building, or cut loose from a swing with a boost |
 | **Left click** | Fire a web ball (damages enemies) |
 | **Right click (hold)** | Shoot a web line and swing. Release to let go and keep your momentum |
-| `Shift` / `C` while swinging | Reel the line in — shorter rope, faster arc |
-| `Ctrl` / `X` while swinging | Pay the line out |
+| `C` while swinging | Haul the line in harder than it already does on its own |
 | `E` | Web-zip: yank yourself straight to whatever the crosshair is on |
 | `Tab` | Live scoreboard |
 | `V` | Cycle camera distance |
-| `Esc` | Release the mouse (click the canvas to grab it again) |
+| `Esc` | Release the mouse (click anywhere to grab it again) |
+
+Whenever the mouse is loose the game says **PAUSED** on screen, and a click
+anywhere takes it back — including during the lobby countdown, where the panel
+covers the whole screen.
 
 If the browser refuses pointer lock — a sandboxed iframe, for instance — the
-game says so and switches to cursor steering: the further the cursor sits from
-the middle of the screen, the faster you turn. Everything else is unchanged.
+mouse still looks around exactly as it does with the lock, because `movementX`
+is reported on every mousemove and not just a captured one. The system pointer
+is hidden so there is only ever one thing on screen to follow. The single thing
+the lock buys is a pointer that never runs out of window, so nudging one edge
+keeps the view turning when it does. Everything else is unchanged.
+The refusal is not assumed to be permanent: a later click tries for the real
+thing again, and the game only stops asking after three refusals in a row.
 
 **Wall-crawling:** hold a movement key into a wall while airborne and you stick
 to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.
@@ -70,7 +78,8 @@ to it. `W`/`S` climb and descend, `A`/`D` shuffle sideways, `Space` kicks off.
 2. **Drop in** — everyone spawns on rooftops, streets and elevated highways
    scattered across a freshly generated city.
 3. **The web closes in** — a shrinking safe zone drives everyone together over
-   six phases. Outside the storm curtain you take escalating damage.
+   six phases, then closes to nothing. Outside the storm curtain you take
+   escalating damage.
 4. **Last hero swinging wins.** Getting eliminated drops you into spectator
    mode; the results board and a fresh city follow shortly after.
 
@@ -133,9 +142,51 @@ the server. Web balls are ray-marched server-side against player hitspheres and
 the city's AABBs. Remote players are rendered ~100 ms in the past and
 interpolated between snapshots.
 
-**Bots** are simulated entirely on the server and behave like extra players:
-they path toward the safe zone, orbit their target, take line-of-sight shots
-with lead and a miss cone, and hop when they bump into a wall.
+**Aiming** is one crosshair, fixed dead centre, and the centre of the screen is
+exactly what the web hits. Two things make that true rather than approximately
+true: the camera takes its orientation straight from yaw and pitch instead of
+easing round to look at the hero, so its forward vector *is* your aim on every
+frame; and the aim ray leaves the camera rather than the hero's eye, since the
+camera sits nine metres back and the same direction from the two origins lands
+on different things. Only the camera's position eases, which is what makes the
+hero drift a little within the frame when you accelerate. The crosshair is
+resolved before anything reads it, so a web fired this frame goes where you are
+pointing now rather than where you were pointing last frame.
+
+**Swinging** is tuned to glide rather than sprint. The web goes wherever the
+crosshair is pointing — any surface in reach, high or low. Only when you are
+pointing at nothing does the aim
+assist take over: it sweeps a cone, keeps the best anchor rather than the first,
+and runs the line up the face of whatever it finds to the roofline, since a wall
+at head height gives a five-metre rope and a pirouette. Gravity on the line is lighter than
+walking gravity, because an arc bought at 30m/s² is over before it starts;
+letting go converts part of the arc into lift so you carry into the next one;
+and the line takes up slack on its own so the bottom of the arc clears the
+street. The line also reels itself in on the way down through each arc and eases
+off on the way up — a swing pumps itself, with nothing to hold — stopping at a
+share of the line you fired so a long arc off a tower stays a long arc. `C`
+hauls in harder for whipping round a corner. `W` no longer reels at all: holding
+forward used to wind every swing down to the shortest rope, which is what made
+it run away from you.
+
+**Frame-rate independence.** The player is simulated in sub-steps of at most
+1/90 s, and every rate — gravity, the swing's energy gain, camera easing — is
+expressed per second. A swing therefore traces the same arc at 30fps as it does
+at 144fps, and a fast release cannot pass through a wall between two frames.
+
+**Adaptive quality.** `main.js` watches its own frame time and moves between
+four tiers, trading render scale, shadow-map size and shadow range for a steady
+frame rate; it steps down quickly and back up slowly so the setting does not
+flap. The shadow frustum follows the player snapped to whole shadow texels,
+which stops shadow edges crawling as you move. Current tier and average frame
+time are readable from the console as `__spoodermin.quality` and
+`__spoodermin.frameAvg`, and `__spoodermin.setQuality(0..3)` pins one.
+
+**Bots** are simulated entirely on the server, and they are non-combatants.
+They wander between points inside the safe zone, sprint for the middle when the
+storm catches them out, and hop when they bump into a wall — but they never
+pick a target and never fire. You can web them; they will not web you back. The
+only things that can take a human's health are the storm and another human.
 
 No build step — the browser loads `three` through an import map served straight
 out of `node_modules`.
